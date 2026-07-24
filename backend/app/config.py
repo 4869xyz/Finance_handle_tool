@@ -55,7 +55,10 @@ class Settings(BaseSettings):
     # App
     debug: bool = True
 
-    model_config = SettingsConfigDict(env_file=".env")
+    # Optional: require token to configure LLM via API (X-LLM-Config-Token)
+    llm_config_token: str = ""
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     def get_active_llm_provider(self) -> Optional[str]:
         """Get the active LLM provider based on configuration."""

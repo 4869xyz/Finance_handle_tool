@@ -1,0 +1,27 @@
+﻿# Dependencies & caches
+**/node_modules/
+**/__pycache__/
+**/.venv/
+**/venv/
+**/.pytest_cache/
+**/dist/
+**/build/
+**/.vite/
+
+# Lock / generated noise
+**/package-lock.json
+**/*.pyc
+
+# Local secrets (never feed into context casually)
+**/.env
+**/.env.local
+
+# Binary / large design assets
+**/*.png
+**/*.jpg
+**/*.jpeg
+**/*.pdf
+**/*.pen
+
+# Ignore feature plans from global search (explicit @ when needed)
+docs/plans/*.md
