@@ -187,6 +187,7 @@ FALLBACK_MODELS = {
         {"id": "google/gemini-1.5-flash", "name": "Gemini 1.5 Flash", "vision": True},
     ],
     "qwen": [
+        {"id": "qwen/qwen3.5-ocr", "name": "Qwen 3.5 OCR", "vision": True},
         {"id": "qwen/qwen2.5-vl-72b-instruct", "name": "Qwen 2.5 VL 72B", "vision": True},
         {"id": "qwen/qwen-vl-plus", "name": "Qwen VL Plus", "vision": True},
         {"id": "qwen/qwen-turbo", "name": "Qwen Turbo", "vision": False},

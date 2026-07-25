@@ -21,7 +21,7 @@ from app.services.prompts import (
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-
+#判断当前模型名是否支持视觉（精确匹配或带 - / . 的前缀匹配，避免误判）
 def _model_matches_vision_pattern(model_name: str, vision_patterns: list[str]) -> bool:
     """Check if a model name matches any vision pattern.
 
@@ -44,7 +44,7 @@ def _model_matches_vision_pattern(model_name: str, vision_patterns: list[str]) -
             return True
     return False
 
-
+#判断是否要用新参数 max_completion_tokens（如 o1 / o3 / gpt-5）
 def _model_uses_new_token_param(model_name: str) -> bool:
     """Check if a model uses max_completion_tokens instead of max_tokens.
 
@@ -59,7 +59,7 @@ def _model_uses_new_token_param(model_name: str) -> bool:
     new_format_prefixes = ["o1", "o3", "gpt-5"]
     return any(model_name.startswith(prefix) for prefix in new_format_prefixes)
 
-
+#按模型返回正确的 max tokens 参数字典
 def _get_max_tokens_param(model_name: str, value: int) -> dict:
     """Get the correct max tokens parameter for a model.
 
@@ -78,13 +78,13 @@ def _get_max_tokens_param(model_name: str, value: int) -> dict:
 class BaseLLMProvider(ABC):
     """Base class for LLM providers."""
 
-    @abstractmethod
+    @abstractmethod #有没有配api key
     def is_configured(self) -> bool:
         """Check if provider is configured."""
         pass
 
-    @abstractmethod
-    def get_provider_name(self) -> str:
+    @abstractmethod 
+    def get_provider_name(self) -> str: #提供商名字
         """Get provider name."""
         pass
 
@@ -93,10 +93,10 @@ class BaseLLMProvider(ABC):
         """Send chat completion request and return response content."""
         pass
 
-    def supports_vision(self) -> bool:
+    def supports_vision(self) -> bool:  #是否支持视觉，看图
         """Check if provider supports vision/image input."""
         return False
-
+    #看图的函数，带图片的调用这个
     def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png") -> str:
         """Send vision completion request with image and return response content.
 
@@ -111,7 +111,7 @@ class BaseLLMProvider(ABC):
         """
         raise NotImplementedError("Vision not supported by this provider")
 
-
+#模型提供商，每个类都是「懒加载客户端 + 文本/视觉调用」
 class OpenAIProvider(BaseLLMProvider):
     """OpenAI/OpenAI-compatible provider."""
 
@@ -318,8 +318,17 @@ class GoogleProvider(BaseLLMProvider):
 class QwenProvider(BaseLLMProvider):
     """Alibaba Qwen provider (OpenAI-compatible)."""
 
-    # Qwen-VL models support vision
-    VISION_MODELS = ["qwen-vl", "qwen2-vl"]
+    # Qwen VL / OCR models support vision (invoice image parsing)
+    # Include qwen2.5-vl / qwen3.5-* so dotted version names match correctly
+    VISION_MODELS = [
+        "qwen-vl",
+        "qwen2-vl",
+        "qwen2.5-vl",
+        "qwen3-vl",
+        "qwen3.5-vl",
+        "qwen3.5-ocr",
+        "qwen-vl-ocr",
+    ]
 
     def __init__(self):
         self._client = None
@@ -494,7 +503,7 @@ PROVIDERS: Dict[str, type] = {
     "zhipu": ZhipuProvider,
 }
 
-
+#业务门面类，负责管理多个模型提供商，并根据配置选择当前活动的提供商
 class LLMService:
     """Handles LLM-based invoice parsing with multi-provider support."""
 
