@@ -19,6 +19,7 @@ interface SidebarProps {
 const navItems: NavItem[] = [
   { path: '/', label: '发票列表' },
   { path: '/upload', label: '上传发票' },
+  { path: '/batches', label: '月度资料识别' },
 ];
 
 export default function Sidebar({ llmConfigured, onOpenLLMConfig }: SidebarProps) {

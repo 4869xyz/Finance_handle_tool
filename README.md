@@ -2,13 +2,13 @@
 
 # Invoice Manager 🧾
 
-### AI-Powered Chinese Invoice Recognition with Dual-Source Verification
-### AI驱动的中文发票识别系统 · OCR+LLM双源验证
+### AI-Powered Invoice and Monthly Reimbursement Document Recognition
+### AI驱动的发票与月度报销资料识别 · OCR+LLM双流程
 
-**v0.3.0** | Latest Release: 2026-01-24
+**v0.4.0** | Latest Release: 2026-07-25
 
 [![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
+[![Python 3.11](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109-009688.svg)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/React-18.2-61DAFB.svg)](https://reactjs.org/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](https://www.docker.com/)
@@ -34,20 +34,32 @@
 - **🇨🇳 Chinese Invoice Optimized** - PaddleOCR + custom prompts for VAT invoices (增值税发票)
 - **⚡ Parallel Processing** - OCR and LLM run simultaneously for faster results
 - **🐳 One-Click Deploy** - Docker Compose, ready in 3 minutes
-- **🔒 Privacy First** - Self-hosted, your data never leaves your server
+- **🔒 Self-Hosted Ledger** - Files stay in your PostgreSQL; configured LLM calls follow that provider's data policy
 
 ## ✨ 亮点
 
+- **📁 月度目录识别** - 按员工和报销月份批量登记发票、补票、支付凭证，统一查看进度与人工复核项
+- **🧾 多资料类型** - 支持电子/增值税/出租车发票、行程单、票据、支付/订单截图、境外收据等
+- **🛡️ 确定性短路** - 视频、精确命名 `PDF合并.pdf`、超像素长图在 OCR/LLM 前安全分流并保留原因
 - **🔍 双源验证** - OCR + LLM 双重识别，字段冲突自动标记待审核
 - **🤖 多模型支持** - 支持 GPT-4o / Claude / Gemini / 通义千问 / DeepSeek / 智谱GLM
 - **🇨🇳 中文发票优化** - PaddleOCR 深度优化 + 增值税发票专用提示词
 - **⚡ 并行处理** - OCR 和 LLM 同时运行，识别更快
 - **🐳 一键部署** - Docker Compose 启动，3分钟搞定
-- **🔒 数据安全** - 本地私有部署，数据不离开服务器
+- **🔒 自托管账本** - 文件存于自己的 PostgreSQL；配置 LLM 后，调用内容受所选提供商的数据政策约束
 
 ---
 
 ## 📦 版本更新 | Changelog
+
+### v0.4.0 (2026-07-25) - 月度多资料识别第一阶段
+
+- 新增 `/batches` 月度资料工作台和 `/api/batches` 批次 API，不改变原 `/api/invoices/*` 单发票流程。
+- 支持浏览器目录上传并严格校验 `发票`、`补票`、`支付凭证` 来源路径、文件配对、数量和体积。
+- 新增批次/来源文档账本、SHA-256、处理状态、原因码、原始模型响应和结构化字段。
+- PDF 使用全页文本层或 OCR；多类型字段由规则和可选 LLM 严格 JSON Schema 提取。
+- 视频仅存元数据；`PDF合并.pdf` 跳过；超 5000 万像素图片进入人工复核。
+- 支持批次统计、2 秒前端轮询、中断恢复和可重试文档重新处理。
 
 ### v0.3.0 (2026-01-24) - UI 全面改版 | UI Redesign
 
@@ -164,31 +176,11 @@
 ## 🏗️ 核心架构 | Architecture
 
 ```
-                              ┌─────────────────┐
-                              │   发票上传       │
-                              │  Invoice Upload  │
-                              └────────┬────────┘
-                                       │
-                    ┌──────────────────┼──────────────────┐
-                    │                  │                  │
-                    ▼                  │                  ▼
-           ┌───────────────┐           │         ┌───────────────┐
-           │   PaddleOCR   │           │         │   LLM Vision  │
-           │   中文OCR识别  │           │         │  GPT-4/Claude │
-           └───────┬───────┘           │         └───────┬───────┘
-                   │                   │                 │
-                   │         ┌────────────────┐          │
-                   └────────►│  智能比对引擎  │◄─────────┘
-                             │ Diff Engine   │
-                             └───────┬───────┘
-                                     │
-                    ┌────────────────┼────────────────┐
-                    ▼                                 ▼
-           ┌───────────────┐                 ┌───────────────┐
-           │   ✅ 匹配      │                 │   ⚠️ 冲突     │
-           │  自动确认      │                 │  人工复核     │
-           │  CONFIRMED    │                 │  REVIEWING    │
-           └───────────────┘                 └───────────────┘
+单发票流程：/upload → /api/invoices → OCR + 可选 Vision LLM → Diff → 确认/复核
+
+月度资料流程：/batches → /api/batches → 路径与特殊规则
+                                      → 通用 PDF/OCR → 类型分类 → 严格字段提取
+                                      → 已识别 / 人工复核 / 跳过 / 失败
 ```
 
 **Why Dual-Source Verification Works | 为什么双源验证更准确**
@@ -206,17 +198,16 @@
 
 ### 最简3步启动 | 3 Steps to Start
 
-```bash
-# 1. 克隆项目 | Clone
-git clone https://github.com/YOUR_USERNAME/invoice_manager.git
-cd invoice_manager
+```powershell
+# 1. 在项目根目录复制配置模板
+Copy-Item backend/.env.example backend/.env
 
-# 2. 配置LLM (可选) | Configure LLM (Optional)
-# 在 backend/.env 中设置 API Key，或稍后在界面中配置
-# Set API Key in backend/.env, or configure later in UI
+# 2. 检查 backend/.env 的 DATABASE_URL；LLM API Key 可留空
+#    使用外部 LLM 时再填入对应提供商的 Key
 
 # 3. 启动服务 | Start Services
-docker-compose up -d
+docker compose up -d
+docker compose ps
 ```
 
 ### 访问地址 | Access URLs
@@ -240,7 +231,7 @@ docker-compose up -d
 | DeepSeek | DeepSeek-VL | [platform.deepseek.com](https://platform.deepseek.com/) |
 | 智谱 | GLM-4V | [open.bigmodel.cn](https://open.bigmodel.cn/) |
 
-> 💡 **提示**: 即使不配置LLM，系统也能正常运行（仅使用OCR）。配置LLM后可获得双源验证能力。
+> 💡 **提示**：LLM 可选。旧单发票流会跳过 Vision 分支；月度资料流可由确定性规则自动通过字段完整且达到阈值的文档，其余进入人工复核。配置 LLM 后才会把相关文本或图像发送给所选提供商。
 
 ---
 
@@ -256,6 +247,16 @@ docker-compose up -d
 | ⚖️ 智能比对 | 自动对比OCR和LLM结果，标记差异 |
 | ✏️ 人工复核 | 冲突字段可视化，一键选择正确值 |
 | 📊 统计报表 | 金额汇总、税额统计、状态分布 |
+
+### 月度资料处理 | Monthly Document Processing
+
+| 功能 | 描述 |
+|-----|------|
+| 📁 目录上传 | 选择含 `发票`、`补票`、`支付凭证` 的月度目录；三者可缺省，允许安全嵌套；员工和月份由表单提供 |
+| 🔐 原子登记 | 最多 200 个文件、单文件 150 MiB、单批 256 MiB；失败时整批不落库 |
+| 🧭 多类型识别 | 发票、行程、票据、支付、订单、境外收据和其他报销资料 |
+| 👀 人工复核队列 | 缺关键字段、低置信度、多笔无汇总、视频和超像素图片均给出原因；第一阶段只查询/重试，不提供批次字段编辑或确认 API |
+| 🔁 恢复与重试 | 服务中断可审计，人工复核/失败文档可选择性重新处理 |
 
 ### 提取字段 | Extracted Fields
 
@@ -280,7 +281,11 @@ docker-compose up -d
     └── 价税合计 (total_with_tax)
 ```
 
+月度资料公开字段按类型统一为：`document_date`、`counterparty`、`description`、`amount`、`currency`、`invoice_number`、`transaction_number`；完整候选字段和多笔交易保存在 `extracted_fields_json`。金额在 API 中以十进制字符串返回。
+
 ### 状态流转 | Status Workflow
+
+旧单发票状态：
 
 ```
 UPLOADED → PROCESSING → REVIEWING → CONFIRMED → REIMBURSED
@@ -289,6 +294,20 @@ UPLOADED → PROCESSING → REVIEWING → CONFIRMED → REIMBURSED
                       NOT_REIMBURSED
                          未报销
 ```
+
+月度批次与文档状态：
+
+```text
+批次：UPLOADED → PROCESSING → COMPLETED
+                      中断/致命错误 → FAILED
+
+文档：UPLOADED → PROCESSING → RECOGNIZED
+                          ├→ NEEDS_MANUAL_REVIEW
+                          └→ FAILED
+特殊规则直接进入 NEEDS_MANUAL_REVIEW 或 SKIPPED
+```
+
+`PROCESS_INTERRUPTED` 等值是原因码，不是处理状态。
 
 ---
 
@@ -330,7 +349,38 @@ GET /api/invoices/statistics
 GET  /api/settings/llm/status
 POST /api/settings/llm/configure
 POST /api/settings/llm/test
+
+# 月度资料批次 | Monthly document batches
+POST /api/batches
+GET  /api/batches
+GET  /api/batches/{id}
+GET  /api/batches/{id}/documents
+POST /api/batches/{id}/reprocess
 ```
+
+创建批次使用 `multipart/form-data`：
+
+| 字段 | 格式 |
+|------|------|
+| `employee_name` | 非空字符串，最长 100 字符 |
+| `expense_month` | `YYYY-MM` |
+| `files` | 重复文件字段 |
+| `relative_paths` | 与 `files` 数量、顺序完全一致的重复字符串字段 |
+
+目录既可直接以 `发票/...` 开头，也可带一个不透明根目录：
+
+```text
+马耿宾2025年3月报销发票/
+├── 发票/电子发票.pdf
+├── 补票/项目A/补充票据.jpg
+└── 支付凭证/项目A/支付截图.png
+```
+
+只允许 PDF、JPG/JPEG、PNG、MP4/MOV/AVI/MKV；拒绝绝对路径、盘符、`.`/`..`、未知来源、空文件和文件名不匹配。服务端按 1 MiB 读取块计数并计算哈希，这不是客户端断点续传。三类来源目录不要求全部出现。
+
+重处理请求体可为空，或传 `{"document_ids":[1,2]}`。只会重置人工复核/失败且仍可处理的文档；处理中、视频、汇总 PDF 和超像素长图不会重复领取。重新安排后批次回到 `UPLOADED`，随后进入 `PROCESSING`。
+
+`POST /api/batches` 成功返回 `202` 和 `Location: /api/batches/{id}`；路径/文件业务校验失败返回 `400`，表单格式失败返回 `422`，批次不存在返回 `404`。列表统一返回 `{items,total,page,page_size}`。
 
 完整 API 文档请访问 http://localhost:18080/docs
 
@@ -340,9 +390,9 @@ POST /api/settings/llm/test
 
 - [x] **v0.1** - 基础OCR识别 + 发票管理
 - [x] **v0.2** - 多LLM支持 + 双源验证
-- [x] **v0.3** - UI全面改版 + OpenRouter模型支持 ✨ **当前版本**
-- [ ] **v0.4** - 报表导出 (Excel/PDF)
-- [ ] **v0.5** - 多用户权限管理
+- [x] **v0.3** - UI全面改版 + OpenRouter模型支持
+- [x] **v0.4** - 月度多资料识别第一阶段 ✨ **当前版本**
+- [ ] **v0.5** - 月度资金表核对与报表增强
 - [ ] **v0.6** - 发票真伪验证 (对接税务API)
 - [ ] **v0.7** - 移动端适配
 - [ ] **v1.0** - 企业级功能 (审批流程、ERP集成)
@@ -397,14 +447,18 @@ invoice_manager/
 ├── backend/                    # FastAPI 后端
 │   ├── app/
 │   │   ├── models/            # SQLAlchemy 数据模型
-│   │   │   └── invoice.py     # Invoice, OcrResult, LlmResult, ParsingDiff
+│   │   │   ├── invoice.py     # 旧单发票账本
+│   │   │   └── batch.py       # 批次、来源文档和状态枚举
 │   │   ├── routers/           # API 路由
 │   │   │   ├── invoices.py    # 发票 CRUD + 处理
+│   │   │   ├── batches.py     # 月度批次 API
 │   │   │   └── settings.py    # LLM 配置
 │   │   ├── services/          # 业务逻辑
 │   │   │   ├── ocr_service.py # PaddleOCR 识别
 │   │   │   ├── llm_service.py # 多 LLM 调用
-│   │   │   └── invoice_service.py # 核心处理流程
+│   │   │   ├── invoice_service.py # 旧发票处理流程
+│   │   │   ├── batch_service.py   # 上传、统计、协调与恢复
+│   │   │   └── document_service.py # 多资料识别与映射
 │   │   ├── schemas/           # Pydantic 数据验证
 │   │   ├── config.py          # 配置管理
 │   │   └── main.py            # 应用入口
@@ -415,6 +469,7 @@ invoice_manager/
 │   ├── src/
 │   │   ├── pages/             # 页面组件
 │   │   │   ├── UploadPage.tsx # 上传页面
+│   │   │   ├── BatchPage.tsx  # 月度资料工作台
 │   │   │   ├── InvoiceListPage.tsx # 列表页面
 │   │   │   └── InvoiceDetailPage.tsx # 详情页面
 │   │   ├── components/        # 通用组件
@@ -456,21 +511,39 @@ invoice_manager/
 
 ### 本地开发 | Local Development
 
-```bash
-# 后端 | Backend
-cd backend
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+```powershell
+# 终端 1：先启动 PostgreSQL（项目根目录）
+docker compose up -d db
+
+# 终端 2：后端
+Set-Location backend
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-uvicorn app.main:app --reload
+$env:DATABASE_URL='postgresql+asyncpg://postgres:postgres@localhost:5435/invoice_db'
+uvicorn app.main:app --host 0.0.0.0 --port 18080 --reload
 
-# 前端 | Frontend
-cd frontend
+# 终端 3：前端（从项目根目录进入）
+Set-Location frontend
 npm install
+$env:VITE_API_URL='http://localhost:18080'
 npm run dev
+```
 
-# 数据库 | Database (需要先启动 PostgreSQL)
-docker-compose up -d db
+验证：
+
+```powershell
+# 后端虚拟环境已激活时，在项目根目录运行
+python -m pytest -q backend/tests
+
+# PostgreSQL 集成测试使用专用库，不要指向业务库
+docker compose exec db createdb -U postgres invoice_test
+$env:TEST_DATABASE_URL='postgresql+asyncpg://postgres:postgres@localhost:5435/invoice_test'
+python -m pytest -q -m postgres_integration backend/tests
+
+Set-Location frontend
+npm run build
+Invoke-RestMethod http://localhost:18080/api/health
 ```
 
 ### 代码规范 | Code Style
@@ -486,7 +559,7 @@ docker-compose up -d db
 <details>
 <summary><b>Q: 不配置LLM可以使用吗？</b></summary>
 
-A: 可以！系统会仅使用 PaddleOCR 进行识别。但配置LLM后可以获得双源验证能力，准确率会显著提升。
+A: 可以。旧单发票流会使用 OCR/规则并跳过 LLM；月度资料流只会自动通过规则分类、字段完整且置信度达标的文档，其余进入人工复核队列。配置 LLM 后，相关文本或图像会发送给所选提供商。
 </details>
 
 <details>
@@ -498,7 +571,7 @@ A: 主要针对中国增值税发票（普通发票、专用发票）优化。�
 <details>
 <summary><b>Q: OCR 识别不准怎么办？</b></summary>
 
-A: 1) 确保上传的图片清晰、方向正确；2) 配置LLM进行双源验证；3) 使用人工复核功能修正。
+A: 1) 确保上传的图片清晰、方向正确；2) 配置 LLM 进行双源验证；3) 旧单发票可在详情页修正，月度批次第一阶段只展示原因并允许重新处理，不提供字段编辑/确认。
 </details>
 
 <details>

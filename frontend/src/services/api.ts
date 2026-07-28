@@ -11,6 +11,14 @@ import type {
   LLMTestResponse,
   ModelsResponse,
 } from '../types/invoice';
+import type {
+  BatchDetail,
+  BatchListResponse,
+  BatchUploadItem,
+  ProcessingBatch,
+  ReprocessResponse,
+  SourceDocumentListResponse,
+} from '../types/batch';
 
 const api = axios.create({
   baseURL: '/api',
@@ -37,6 +45,61 @@ export const uploadInvoices = async (files: File[]): Promise<UploadResponse[]> =
       'Content-Type': 'multipart/form-data',
     },
   });
+  return response.data;
+};
+
+export const createDocumentBatch = async (
+  employeeName: string,
+  expenseMonth: string,
+  items: BatchUploadItem[]
+): Promise<ProcessingBatch> => {
+  const formData = new FormData();
+  formData.append('employee_name', employeeName);
+  formData.append('expense_month', expenseMonth);
+  items.forEach(({ file, relativePath }) => {
+    formData.append('files', file, file.name);
+    formData.append('relative_paths', relativePath);
+  });
+  const response = await api.post('/batches', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+  return response.data;
+};
+
+export const listDocumentBatches = async (
+  page = 1,
+  pageSize = 10
+): Promise<BatchListResponse> => {
+  const response = await api.get('/batches', {
+    params: { page, page_size: pageSize },
+  });
+  return response.data;
+};
+
+export const getDocumentBatch = async (id: number): Promise<BatchDetail> => {
+  const response = await api.get(`/batches/${id}`);
+  return response.data;
+};
+
+export const listBatchDocuments = async (
+  id: number,
+  page = 1,
+  pageSize = 20
+): Promise<SourceDocumentListResponse> => {
+  const response = await api.get(`/batches/${id}/documents`, {
+    params: { page, page_size: pageSize },
+  });
+  return response.data;
+};
+
+export const reprocessDocumentBatch = async (
+  id: number,
+  documentIds?: number[]
+): Promise<ReprocessResponse> => {
+  const response = await api.post(
+    `/batches/${id}/reprocess`,
+    documentIds ? { document_ids: documentIds } : {}
+  );
   return response.data;
 };
 

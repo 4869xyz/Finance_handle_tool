@@ -14,4 +14,4 @@
 
 ## 当前计划
 
-（暂无；新建需求时在此添加）
+- [月度多资料识别第一阶段实施计划](monthly_document_recognition_phase1_plan.md)（已完成）

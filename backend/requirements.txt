@@ -9,12 +9,13 @@ asyncpg==0.29.0
 alembic==1.13.1
 psycopg2-binary==2.9.9
 
-# OCR - using headless OpenCV for Docker
-# Pin to v2.x for stable API and numpy 1.x for opencv compatibility
-numpy<2.0
-paddlepaddle==2.6.2
+# OCR
+numpy==1.26.4
+paddlepaddle==3.0.0
 paddleocr==2.7.3
-opencv-python-headless>=4.8.0
+pdf2docx==0.5.7
+opencv-python==4.6.0.66
+opencv-contrib-python==4.6.0.66
 
 # LLM (optional)
 openai>=1.50.0,<2.0
@@ -35,3 +36,4 @@ slowapi==0.1.9
 pytest==7.4.4
 pytest-asyncio==0.23.3
 httpx==0.26.0
+aiosqlite==0.20.0

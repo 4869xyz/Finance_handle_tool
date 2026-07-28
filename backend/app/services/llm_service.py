@@ -364,6 +364,7 @@ class QwenProvider(BaseLLMProvider):
             ],
             temperature=0.1,
             max_tokens=1000,
+            response_format={"type": "json_object"},
         )
         return response.choices[0].message.content.strip()
 
@@ -386,6 +387,7 @@ class QwenProvider(BaseLLMProvider):
             ],
             temperature=0.1,
             max_tokens=1500,
+            response_format={"type": "json_object"},
         )
         return response.choices[0].message.content.strip()
 

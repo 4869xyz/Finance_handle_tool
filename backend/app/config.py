@@ -28,7 +28,7 @@ class Settings(BaseSettings):
 
     # Qwen (Alibaba)
     qwen_api_key: str = ""
-    qwen_model: str = "qwen3.5-ocr"
+    qwen_model: str = "qwen3-vl-plus"
     qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
     # DeepSeek
@@ -44,6 +44,18 @@ class Settings(BaseSettings):
     # File upload
     max_file_size: int = 10 * 1024 * 1024  # 10MB
     allowed_extensions: list[str] = ["pdf", "jpg", "jpeg", "png"]
+
+    # Monthly document batch upload (kept separate from legacy invoice upload)
+    batch_max_file_size: int = 150 * 1024 * 1024
+    batch_max_total_size: int = 256 * 1024 * 1024
+    batch_max_files: int = 200
+    batch_allowed_extensions: list[str] = [
+        "pdf", "jpg", "jpeg", "png", "mp4", "mov", "avi", "mkv"
+    ]
+    batch_image_max_pixels: int = 50_000_000
+    batch_processing_concurrency: int = 2
+    batch_classification_threshold: float = 0.80
+    batch_extraction_threshold: float = 0.75
 
     # Parallel processing settings
     # Separate pools for OCR and LLM to maximize throughput

@@ -18,11 +18,16 @@ RUN for i in 1 2 3 4 5; do \
 
 # Install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir paddlepaddle==3.0.0 \
+        --index-url https://www.paddlepaddle.org.cn/packages/stable/cpu/
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir --force-reinstall --no-deps \
+        opencv-contrib-python==4.6.0.66 \
+    && pip check
 
 # Copy application
 COPY . .
 
 EXPOSE 18080
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "18080", "--reload"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "18080"]

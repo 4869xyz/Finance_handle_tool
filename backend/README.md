@@ -11,8 +11,16 @@
 | `.env` | 运行时密钥与 `DATABASE_URL`（本地，勿提交真实密钥） | `app/config.py` |
 | `.env.example` | 环境变量模板 | 新人复制为 `.env` |
 | `app/` | 应用源码 | 见 `app/README.md` |
-| `tests/` | 单元/解析相关测试 | `app/services` |
+| `tests/` | 旧发票回归及批次路径、上传、短路、识别、状态和可选 PostgreSQL 集成测试 | `app/services` |
 
 ## 启动
 
 通常由根目录 `docker-compose.yml` 的 `backend` 服务启动：`uvicorn app.main:app --port 18080`。
+
+测试：
+
+```powershell
+python -m pytest -q tests
+# 配置 TEST_DATABASE_URL 后执行 PostgreSQL 并发领取测试
+python -m pytest -q -m postgres_integration tests
+```

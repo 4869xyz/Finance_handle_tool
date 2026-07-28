@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import UploadPage from './pages/UploadPage';
 import InvoiceListPage from './pages/InvoiceListPage';
 import InvoiceDetailPage from './pages/InvoiceDetailPage';
+import BatchPage from './pages/BatchPage';
 import LLMConfigModal from './components/LLMConfigModal';
 import { MainLayout } from './components/layout';
 import { getLLMStatus } from './services/api';
@@ -47,6 +48,7 @@ function AppContent() {
       <Routes>
         <Route path="/" element={<InvoiceListPage />} />
         <Route path="/upload" element={<UploadPage />} />
+        <Route path="/batches" element={<BatchPage />} />
         <Route path="/invoices/:id" element={<InvoiceDetailPage />} />
       </Routes>
 

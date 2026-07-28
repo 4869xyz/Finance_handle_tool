@@ -162,7 +162,7 @@ async def process_invoice(invoice_id: int, db: AsyncSession) -> bool:
         # Run OCR and LLM vision in PARALLEL using separate thread pools
         loop = asyncio.get_running_loop()
 
-        # Create tasks for parallel execution
+        # Create tasks for parallel execution两条不一样的线程
         # OCR uses CPU-bound pool, LLM uses I/O-bound pool
         ocr_task = loop.run_in_executor(
             _ocr_executor, _run_ocr, invoice.file_data, invoice.file_type

@@ -8,8 +8,11 @@
 ## 1. 业务定性
 
 - **类型**：前后端分离的 Web 应用（React + FastAPI + PostgreSQL）
-- **核心目标**：上传中国增值税发票 → OCR + Vision LLM 双源识别 → 字段比对/人工审核 → 列表管理与导出
-- **不在范围内（当前）**：行程单、火车票、酒店水单等非增值税发票专用识别
+- **核心目标**：
+  1. 保留单张中国增值税发票 → OCR + Vision LLM 双源识别 → 字段比对/人工审核；
+  2. 新增员工月度目录 → 多资料登记/分类/提取 → 批次统计与人工复核。
+- **第一阶段范围**：`发票`、`补票`、`支付凭证` 目录；发票、行程/票据、支付/订单截图、境外收据等通用字段。
+- **不在第一阶段范围**：月度资金 Excel 核对、视频内容识别、图片相似去重、审批/ERP 对接。
 
 ---
 
@@ -51,7 +54,7 @@ Finance_handle_tool/
 │   │   ├── models/              # SQLAlchemy 表模型
 │   │   ├── schemas/             # Pydantic 请求/响应模型
 │   │   ├── routers/             # HTTP 路由
-│   │   ├── services/            # 业务：OCR / LLM / 发票编排 / 审计
+│   │   ├── services/            # OCR / LLM / 单发票与批次编排 / 审计
 │   │   └── repositories/        # 数据访问层占位（当前较薄）
 │   └── tests/
 │
@@ -62,7 +65,7 @@ Finance_handle_tool/
 │   ├── index.html
 │   └── src/
 │       ├── main.tsx / App.tsx
-│       ├── pages/               # 上传 / 列表 / 详情页
+│       ├── pages/               # 单发票上传/列表/详情 + 月度批次页
 │       ├── components/          # 布局、仪表盘、状态标签等
 │       ├── services/api.ts      # 调用后端 API
 │       ├── hooks/ / types/ / styles/
@@ -102,18 +105,18 @@ Finance_handle_tool/
 Frontend (UI)
     │  HTTP /api/*
     ▼
-Routers (health / invoices / settings)
+Routers (health / invoices / batches / settings)
     │
-    ▼
-Services (invoice_service 编排 → ocr_service + llm_service + audit_service)
-    │
+    ├─ invoice_service → ocr_service + llm_service + audit_service
+    └─ batch_service → document_service → ocr_service + llm_service
     ▼
 Models + Database (PostgreSQL)
 ```
 
 - **Core 配置层**：`config.py`、`database.py` — 被全后端依赖，勿反向依赖 routers
 - **识别层**：`ocr_service` / `llm_service` / `prompts` — 只做识别与解析，不直接碰 HTTP
-- **编排层**：`invoice_service` — 上传后处理、字段合并、状态流转
+- **编排层**：`invoice_service` 负责旧单发票流；`batch_service` 负责批次登记、领取、统计、恢复和重试
+- **通用文档层**：`document_service` — 类型判定、严格模型响应校验、关键字段矩阵和公开字段映射
 - **展示层**：前端 pages/components — 只消费 API，不感知 DB
 
 ---
@@ -127,13 +130,43 @@ Models + Database (PostgreSQL)
   → POST /api/invoices/upload
   → 文件字节写入 invoices.file_data（PostgreSQL）
   → 后台任务 process_invoice：
-        并行 OCR(PaddleOCR/规则) + Vision LLM
+        OCR(PaddleOCR/规则) + 已配置时的 Vision LLM
         → 写 ocr_results / llm_results / parsing_diffs
         → 更新 invoices 字段与 status
   → 列表/详情刷新展示
 ```
 
-### 6.2 状态流转（简化）
+### 6.2 月度目录登记与识别
+
+```text
+用户在 /batches 填员工与月份并选择目录
+  → POST /api/batches（files 与 relative_paths 同序配对）
+  → 严格路径/扩展名/数量/体积校验，分块计算 SHA-256
+  → processing_batches + source_documents 原子登记
+  → 特殊规则先行：
+       视频 → 人工复核且 file_data=NULL
+       PDF合并.pdf → 跳过
+       超 5000 万像素图片 → 人工复核且不解码/OCR/LLM
+  → 其余文档由全局并发 2 的后台协调器领取
+  → PDF 全页文本层或 PaddleOCR
+  → 正文确定性分类；歧义时调用已配置 LLM
+  → 严格 JSON Schema 提取 + 类型关键字段矩阵
+  → RECOGNIZED / NEEDS_MANUAL_REVIEW / FAILED
+  → 批次无活动文档后 COMPLETED
+```
+
+允许的路径形态为 `发票/文件.pdf` 或 `任意根目录/发票/文件.pdf`，`补票`、`支付凭证` 同理；允许来源目录内继续嵌套，三类来源不要求全部出现。扩展名白名单为 PDF、JPG/JPEG、PNG、MP4/MOV/AVI/MKV。员工与月份来自表单（月份 `YYYY-MM`），不解析不透明根目录。
+
+关键不变量：
+
+- 文件名和目录名不能提供日期、金额、发票号等业务字段。
+- 多笔独立交易没有可信汇总金额时，公开金额为空，候选交易保留在 JSON。
+- 单文档失败不会让正常批次失败；批次 `FAILED` 只表示协调中断或致命失败。
+- 启动恢复把遗留的活动文档标为 `PROCESS_INTERRUPTED`，由用户显式重新处理。
+- `PROCESS_INTERRUPTED`、`MULTIPLE_TRANSACTIONS` 等是 `status_reason` 原因码，不是处理状态。
+- 第一阶段“人工复核”表示可查询的工作队列和原因，不提供批次文档字段编辑/确认 API。
+
+### 6.3 状态流转（简化）
 
 ```text
 uploaded → processing → confirmed
@@ -141,17 +174,29 @@ uploaded → processing → confirmed
 失败重试耗尽 → 回退 uploaded
 ```
 
-### 6.3 配置与健康
+```text
+批次：UPLOADED → PROCESSING → COMPLETED
+                                 ├─ 文档 RECOGNIZED
+                                 ├─ 文档 NEEDS_MANUAL_REVIEW
+                                 ├─ 文档 SKIPPED
+                                 └─ 文档 FAILED
+协调中断：UPLOADED / PROCESSING → FAILED → reprocess
+```
+
+### 6.4 配置与健康
 
 ```text
 LLM 密钥/模型：backend/.env + /api/settings
 健康检查：/api/health（含 DB 连通）
 ```
 
-### 6.4 数据存储事实
+### 6.5 数据存储事实
 
 - **原始发票文件**：DB `invoices.file_data`（不落本地 uploads 目录）
 - **识别结果**：DB 表 `ocr_results` / `llm_results` / `parsing_diffs`
+- **月度批次**：DB 表 `processing_batches` / `source_documents`
+- **批次视频**：仅存路径、大小、哈希和人工复核原因，`source_documents.file_data` 为空
+- **其他批次文件**：原始字节存 `source_documents.file_data`；哈希仅审计，不自动去重
 - **导出 CSV/Excel**：内存生成后直接下载，不落盘归档
 
 ---
@@ -172,25 +217,32 @@ LLM 密钥/模型：backend/.env + /api/settings
 | 文件 | 作用 |
 |------|------|
 | `routers/invoices.py` | 上传、列表、详情、文件、导出、差异确认 |
+| `routers/batches.py` | 月度批次创建、列表、详情、文档分页和重处理 |
 | `routers/settings.py` | LLM 配置与连通测试 |
 | `routers/health.py` | 健康检查 |
 | `services/invoice_service.py` | 处理编排、字段合并、待审核判定 |
+| `services/batch_service.py` | 路径校验、流式登记、特殊规则、领取、统计、恢复和重试 |
+| `services/document_service.py` | 通用分类、严格提取、关键字段校验与公开字段映射 |
+| `services/document_prompts.py` | 多资料分类/提取 Prompt |
 | `services/ocr_service.py` | PaddleOCR + 增值税字段规则抽取 |
 | `services/llm_service.py` | 多厂商 Vision 调用与 JSON 解析 |
 | `services/prompts.py` | 中国发票 Vision Prompt / Schema |
 | `models/invoice.py` | invoices / ocr_results / llm_results / parsing_diffs |
+| `models/batch.py` | processing_batches / source_documents / 批次枚举 |
 | `models/audit_log.py` | 审计日志表 |
 
 ### 前端
 
 | 文件 | 作用 |
 |------|------|
-| `src/App.tsx` | 路由：上传 / 列表 / 详情 |
+| `src/App.tsx` | 路由：上传 / 列表 / 详情 / 月度资料 |
 | `src/pages/UploadPage.tsx` | 上传页 |
 | `src/pages/InvoiceListPage.tsx` | 列表 + 统计 + 筛选导出 |
 | `src/pages/InvoiceDetailPage.tsx` | 详情 + OCR/LLM 差异对比 |
+| `src/pages/BatchPage.tsx` | 目录上传、批次统计、轮询和文档分页明细 |
 | `src/services/api.ts` | 封装 REST 调用 |
 | `src/types/invoice.ts` | 前端类型定义 |
+| `src/types/batch.ts` | 批次/文档类型与中文状态、原因映射 |
 
 ### 基础设施
 

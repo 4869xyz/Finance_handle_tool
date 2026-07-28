@@ -16,3 +16,5 @@
 ## 访问
 
 Docker 启动后：http://localhost:15173
+
+`npm run build` 会先执行严格 TypeScript 检查，再由 Vite 生成生产产物。月度资料页面位于 `/batches`。

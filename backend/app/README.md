@@ -6,8 +6,8 @@ FastAPI 应用包。
 
 | 文件 | 职责 | 依赖 |
 |------|------|------|
-| `main.py` | 应用入口：CORS、路由挂载、启动建表 | `config`、`database`、`routers/*` |
-| `config.py` | Settings：DB、LLM、上传限制、并发池等 | `.env` / 环境变量 |
+| `main.py` | 应用入口：CORS、路由挂载、启动建表与批次中断恢复 | `config`、`database`、`routers/*` |
+| `config.py` | Settings：DB、LLM、旧上传与批次上传限制、识别阈值/并发等 | `.env` / 环境变量 |
 | `database.py` | **数据库连接**：engine、`get_db()`、`Base` | `config.database_url` |
 | `rate_limit.py` | API 限流 | slowapi |
 | `models/` | ORM 表 | 见该目录 README |
@@ -18,4 +18,4 @@ FastAPI 应用包。
 
 ## 数据流
 
-`routers` → `services` → `models` / DB（经 `database.get_db`）
+`routers` → `services` → `models` / DB（经 `database.get_db`）。旧单发票流与月度批次流使用独立模型和编排服务，共享 OCR/LLM 基础能力。

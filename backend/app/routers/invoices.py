@@ -47,7 +47,7 @@ def _parse_date_param(value: Optional[str], field_name: str) -> Optional[date]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"{field_name} 日期格式无效，应为 YYYY-MM-DD") from exc
 
-
+#异步函数，上传发票文件，支持多文件，上传后异步触发OCR解析
 @router.post("/upload", response_model=List[UploadResponse])
 @limiter.limit("10/minute")
 async def upload_invoices(

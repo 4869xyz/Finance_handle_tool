@@ -134,7 +134,7 @@ DEFAULT_MODELS = {
     "openai": "gpt-4o-mini",
     "anthropic": "claude-3-haiku-20240307",
     "google": "gemini-1.5-flash",
-    "qwen": "qwen3.5-ocr",
+    "qwen": "qwen3-vl-plus",
     "deepseek": "deepseek-chat",
     "zhipu": "glm-4-flash",
 }

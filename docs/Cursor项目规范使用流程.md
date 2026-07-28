@@ -104,21 +104,23 @@ docker compose logs -f
 ## 3. 首次配置
 
 1. 复制 `backend/.env.example` → `backend/.env`（若尚未有）  
-2. 配置 `DATABASE_URL` 与 LLM 相关 Key（如 Qwen / OpenAI）  
+2. 检查 `DATABASE_URL`；LLM Key 可选，仅在需要对应模型服务时配置
 3. `docker compose up -d`  
-4. 打开前端 → 设置 LLM → 上传增值税发票试用  
+4. 打开前端 → 设置 LLM → 可上传单发票，或在“月度资料识别”选择员工月度目录
 
 ## 4. 数据在哪
 
 - 上传的发票文件：PostgreSQL `invoices.file_data`（不是本地 uploads 文件夹）  
 - 识别结果：`ocr_results` / `llm_results` / `parsing_diffs`  
+- 月度批次与文档：`processing_batches` / `source_documents`；视频的 `file_data` 为空
 - 物理存储：Docker 卷 `postgres_data`  
 
 ## 5. 能力边界（避免误解）
 
 - **支持**：中国增值税发票（纸质/电子/全电等字段体系）  
 - **技术**：PaddleOCR + 规则抽取 + Vision LLM 双源比对  
-- **不支持（产品级）**：行程单、火车票、酒店水单等专用识别  
+- **第一阶段新增**：发票/补票/支付凭证目录，支持行程票据、支付/订单截图、境外收据等通用识别与人工复核
+- **暂不支持**：月度资金 Excel 核对、视频内容识别、图片相似去重
 
 ---
 
@@ -192,7 +194,7 @@ docker compose logs -f
 
 | 路径 | 作用 |
 |------|------|
-| `src/pages/` | 上传、列表、详情页 |
+| `src/pages/` | 上传、列表、详情、月度资料页 |
 | `src/components/` | 布局、统计卡、状态标签等 |
 | `src/services/api.ts` | 调后端 |
 | `vite.config.ts` | 开发服务器与代理 |

@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 _ocr_lock = threading.Lock()
 _extractor_lock = threading.Lock()
 
-
+#OCR服务类，负责处理图像的OCR识别
 class OCRService:
     """Handles OCR processing for invoice images using PaddleOCR."""
 
@@ -43,7 +43,7 @@ class OCRService:
                     )
                     logger.info("PaddleOCR initialized successfully")
         return self._ocr
-
+    #解析 PaddleOCR 原始结果 → 文本行、置信度、带 bbox 的行元数据
     def _extract_text_from_result(self, result) -> Tuple[List[str], List[float], List[Dict[str, Any]]]:
         """Extract text, confidences, and line metadata from OCR result (v2.x API)."""
         text_lines: List[str] = []
@@ -87,13 +87,13 @@ class OCRService:
                             })
 
         return text_lines, confidences, line_items
-
+    #按阅读顺序排序（先上后下，再左到右）
     def _sort_lines_by_position(self, lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Sort OCR lines by approximate reading order (top-to-bottom, left-to-right)."""
         if not lines:
             return []
         return sorted(lines, key=lambda item: (round(item["min_y"] / 10), item["min_x"]))
-
+    #处理图像，提取文本
     def process_image(self, image_data: bytes) -> Tuple[str, float, List[Dict[str, Any]]]:
         """Process image bytes and extract text.
 
@@ -177,6 +177,33 @@ class OCRService:
         except Exception as e:
             logger.warning(f"PDF text layer extraction failed: {e}")
             return "", False
+
+    def extract_document_pdf_text(self, pdf_data: bytes) -> tuple[str, bool]:
+        """Extract every PDF page without invoice-specific usefulness checks."""
+        try:
+            import pdfplumber
+
+            all_text: list[str] = []
+            with pdfplumber.open(BytesIO(pdf_data)) as pdf:
+                for page in pdf.pages:
+                    text = page.extract_text()
+                    if text and text.strip():
+                        all_text.append(text.strip())
+            combined_text = "\n".join(all_text)
+            return combined_text, bool(combined_text.strip())
+        except Exception as exc:
+            logger.warning("Generic PDF text layer extraction failed: %s", exc)
+            return "", False
+
+    def process_document_pdf(
+        self,
+        pdf_data: bytes,
+    ) -> Tuple[str, float, List[Dict[str, Any]]]:
+        """Process a generic PDF for the monthly document workflow."""
+        text_layer, has_text = self.extract_document_pdf_text(pdf_data)
+        if has_text:
+            return text_layer, 99.0, []
+        return self.process_pdf(pdf_data)
 
     def process_pdf(self, pdf_data: bytes) -> Tuple[str, float, List[Dict[str, Any]]]:
         """Process PDF and extract text from all pages.
