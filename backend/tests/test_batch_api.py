@@ -9,6 +9,10 @@ from httpx import AsyncClient
 
 from app.database import Base, get_db
 from app.main import app
+from app.routers.batches import (
+    _append_classification_worksheet,
+    _classification_headers,
+)
 from app.models.batch import (
     BatchStatus,
     DocumentType,
@@ -22,6 +26,7 @@ from app.services.exclusion_service import FilterDecision, FilterOutcome
 from app.services.expense_classification_service import (
     ExpenseClassification,
     ExpenseClassificationStatus,
+    build_expense_summary_groups,
 )
 
 
@@ -74,6 +79,7 @@ async def test_batch_api_create_query_and_atomic_mismatch(monkeypatch):
             documents = await client.get("/api/batches/1/documents")
             assert documents.status_code == 200
             assert documents.json()["items"][0]["processing_status"] == "UPLOADED"
+            assert "currency" not in documents.json()["items"][0]
             assert processing_calls == []
 
             async with maker() as db:
@@ -197,19 +203,21 @@ async def test_batch_excel_export_includes_all_documents_and_typed_values():
             workbook = load_workbook(BytesIO(response.content), data_only=True)
             worksheet = workbook['识别结果']
             assert worksheet.max_row == 3
-            assert worksheet.max_column == 22
+            assert worksheet.max_column == 21
             assert worksheet.freeze_panes == 'A2'
-            assert worksheet.auto_filter.ref == 'A1:V3'
+            assert worksheet.auto_filter.ref == 'A1:U3'
             assert [cell.value for cell in worksheet[1]][:5] == [
                 '序号', '员工姓名', '报销月份', '批次号', '来源'
             ]
+            assert "币种" not in [cell.value for cell in worksheet[1]]
+            assert worksheet['P1'].value == '发票号码'
             assert worksheet['I2'].value == '已识别'
             assert worksheet['L2'].value == datetime(2025, 7, 5)
             assert worksheet['O2'].value == 19.5
             assert worksheet['O2'].number_format == '#,##0.00'
-            assert worksheet['S2'].value == 0.95
-            assert worksheet['S2'].number_format == '0.0%'
-            assert worksheet['T2'].value == 0.91
+            assert worksheet['R2'].value == 0.95
+            assert worksheet['R2'].number_format == '0.0%'
+            assert worksheet['S2'].value == 0.91
             assert worksheet['I3'].value == '已跳过'
             assert worksheet['J3'].value == '重复汇总PDF，已跳过'
 
@@ -220,7 +228,7 @@ async def test_batch_excel_export_includes_all_documents_and_typed_values():
         await engine.dispose()
 
 
-async def test_filtered_batch_export_has_auditable_six_sheet_reconciliation(monkeypatch):
+async def test_filtered_batch_export_has_auditable_seven_sheet_reconciliation(monkeypatch):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -236,6 +244,7 @@ async def test_filtered_batch_export_has_auditable_six_sheet_reconciliation(monk
             (FilterOutcome.KEEP, "BUSINESS_EXPENSE"),
             (FilterOutcome.EXCLUDE, "DUPLICATE_SUMMARY_PDF"),
             (FilterOutcome.REVIEW, "SOURCE_NOT_RECOGNIZED"),
+            (FilterOutcome.KEEP, "BUSINESS_EXPENSE"),
         ]
         return [
             FilterDecision(
@@ -244,7 +253,11 @@ async def test_filtered_batch_export_has_auditable_six_sheet_reconciliation(monk
                 reason_code=code,
                 reason="测试原因",
                 evidence="测试证据",
-                buyer_name="示例科技有限公司" if index == 0 else None,
+                buyer_name=(
+                    "示例科技有限公司"
+                    if index == 0
+                    else "另一付款公司" if index == 4 else None
+                ),
                 buyer_tax_id=None,
                 confidence=0.95 if outcome == FilterOutcome.KEEP else None,
                 company_profile_version=profile.version if profile else None,
@@ -258,6 +271,7 @@ async def test_filtered_batch_export_has_auditable_six_sheet_reconciliation(monk
             ("办公费", "打印纸", "打印纸采购", ExpenseClassificationStatus.CLASSIFIED),
             ("待分类", "", "PDF合并", ExpenseClassificationStatus.UNCLASSIFIED),
             ("待分类", "", "订单凭证", ExpenseClassificationStatus.UNCLASSIFIED),
+            ("办公费", "打印纸", "打印纸采购", ExpenseClassificationStatus.CLASSIFIED),
         ]
         return {
             document.id: ExpenseClassification(
@@ -289,8 +303,8 @@ async def test_filtered_batch_export_has_auditable_six_sheet_reconciliation(monk
                 employee_name="张三",
                 expense_month=date(2025, 7, 1),
                 status=BatchStatus.COMPLETED,
-                total_files=4,
-                recognized_files=2,
+                total_files=5,
+                recognized_files=3,
                 manual_review_files=1,
                 skipped_files=1,
             )
@@ -341,6 +355,7 @@ async def test_filtered_batch_export_has_auditable_six_sheet_reconciliation(monk
                     document_type=DocumentType.UNKNOWN,
                     processing_status=ProcessingStatus.SKIPPED,
                     status_reason="DUPLICATE_SUMMARY_PDF",
+                    currency="USD",
                     processing_attempts=0,
                 ),
                 SourceDocument(
@@ -353,6 +368,21 @@ async def test_filtered_batch_export_has_auditable_six_sheet_reconciliation(monk
                     file_hash="d" * 64,
                     document_type=DocumentType.ORDER_SCREENSHOT,
                     processing_status=ProcessingStatus.NEEDS_MANUAL_REVIEW,
+                    amount=Decimal("12.00"),
+                    processing_attempts=1,
+                ),
+                SourceDocument(
+                    batch_id=batch.id,
+                    source_folder=SourceFolder.INVOICE,
+                    relative_path="发票/e.pdf",
+                    file_name="e.pdf",
+                    file_type="pdf",
+                    file_size=1,
+                    file_hash="e" * 64,
+                    document_type=DocumentType.ELECTRONIC_INVOICE,
+                    processing_status=ProcessingStatus.RECOGNIZED,
+                    amount=Decimal("5.00"),
+                    currency="CNY",
                     processing_attempts=1,
                 ),
             ])
@@ -373,6 +403,7 @@ async def test_filtered_batch_export_has_auditable_six_sheet_reconciliation(monk
                 "排除与待复核",
                 "发票补票_分类汇总",
                 "支付凭证_分类汇总",
+                "分类审计明细",
             ]
             original = workbook["识别结果"]
             invoice = workbook["发票补票_剔除后"]
@@ -380,90 +411,195 @@ async def test_filtered_batch_export_has_auditable_six_sheet_reconciliation(monk
             exception = workbook["排除与待复核"]
             invoice_classification = workbook["发票补票_分类汇总"]
             payment_classification = workbook["支付凭证_分类汇总"]
-            assert original.max_row == 5
-            assert original.max_column == 22
-            assert invoice.max_row == 3
+            classification_audit = workbook["分类审计明细"]
+            assert original.max_row == 6
+            assert original.max_column == 21
+            assert invoice.max_row == 4
             assert payment.max_row == 3
             assert exception.max_row == 3
-            assert invoice.max_column == payment.max_column == exception.max_column == 33
-            assert invoice["W1"].value == "筛选结论"
-            assert invoice["AF1"].value == "辅助表版本"
-            assert invoice["AG1"].value == "辅助匹配依据"
-            assert invoice["W2"].value == "保留"
+            assert invoice.max_column == payment.max_column == exception.max_column == 32
+            assert "币种" not in [cell.value for cell in original[1]]
+            assert "币种" not in [cell.value for cell in invoice[1]]
+            assert invoice["V1"].value == "筛选结论"
+            assert invoice["AE1"].value == "辅助表版本"
+            assert invoice["AF1"].value == "辅助匹配依据"
+            assert invoice["V2"].value == "保留"
             assert invoice["A2"].font.color.type != "rgb"
             assert original["A4"].font.color.type != "rgb"
             assert invoice["F3"].value == "PDF合并.pdf"
-            assert invoice["W3"].value == "排除"
+            assert invoice["V3"].value == "排除"
             assert all(
                 cell.font.color.type == "rgb"
                 and cell.font.color.rgb.endswith("C00000")
                 for cell in invoice[3]
             )
             assert payment["F3"].value == "d.jpg"
-            assert payment["W3"].value == "待复核"
+            assert payment["V3"].value == "待复核"
             assert all(
                 cell.font.color.type == "rgb"
                 and cell.font.color.rgb.endswith("C00000")
                 for cell in payment[3]
             )
-            assert exception["W2"].value == "排除"
-            assert exception["W3"].value == "待复核"
+            assert exception["V2"].value == "排除"
+            assert exception["V3"].value == "待复核"
             assert exception["A2"].fill.fgColor.rgb.endswith("FCE8E6")
             assert exception["A3"].fill.fgColor.rgb.endswith("FFF4CC")
             assert original.max_row - 1 == (
                 invoice.max_row - 1 + payment.max_row - 1
             )
             assert exception.max_row - 1 == 2
-            assert invoice_classification.max_column == 31
-            assert payment_classification.max_column == 31
-            assert invoice_classification["F1"].value == "费用类型"
-            assert invoice_classification["Z1"].value == "发票补票金额"
-            assert invoice_classification["AB1"].value == "支付凭证金额"
-            assert invoice_classification["AD1"].value == "核对状态"
-            assert sum(
-                cell.value == "明细" for cell in invoice_classification["A"]
-            ) == 2
-            assert sum(
-                cell.value == "明细" for cell in payment_classification["A"]
-            ) == 2
+            assert invoice_classification.max_column == 14
+            assert payment_classification.max_column == 14
+            assert invoice_classification["A1"].value == "序号"
+            assert invoice_classification["D1"].value == "费用类型"
+            assert invoice_classification["H1"].value == "发票号码"
+            assert payment_classification["H1"].value == "交易/订单号"
+            assert invoice_classification["K1"].value == "申请人"
+            assert invoice_classification["L1"].value == "费用类型"
+            assert invoice_classification["M1"].value == "费用详细事项"
+            assert invoice_classification["N1"].value == "合计金额"
+            assert "支付主体" not in [
+                cell.value for cell in invoice_classification[1]
+            ]
+            assert "差额（发票-支付）" not in [
+                cell.value for cell in invoice_classification[1]
+            ]
+            assert "核对状态" not in [cell.value for cell in invoice_classification[1]]
+            assert "币种" not in [cell.value for cell in invoice_classification[1]]
+            assert "币种" not in [cell.value for cell in payment_classification[1]]
+            assert classification_audit.max_row == 6
+            assert classification_audit.max_column == 15
+            assert classification_audit["G1"].value == "分类状态"
+            assert classification_audit["O1"].value == "分类规则版本"
+            assert [
+                cell.value
+                for cell in invoice_classification["A"]
+                if cell.row > 1 and cell.value is not None
+            ] == [1, 2, 3]
+            assert [
+                cell.value
+                for cell in payment_classification["A"]
+                if cell.row > 1 and cell.value is not None
+            ] == [1, 2]
             invoice_duplicate_row = next(
                 row
                 for row in invoice_classification.iter_rows(min_row=2)
-                if row[15].value == "PDF合并.pdf"
+                if row[8].value == "PDF合并.pdf"
             )
             payment_review_row = next(
                 row
                 for row in payment_classification.iter_rows(min_row=2)
-                if row[15].value == "d.jpg"
+                if row[8].value == "d.jpg"
             )
             assert all(
                 cell.font.color.type == "rgb"
                 and cell.font.color.rgb.endswith("C00000")
-                for cell in invoice_duplicate_row
+                for cell in invoice_duplicate_row[:10]
             )
             assert all(
                 cell.font.color.type == "rgb"
                 and cell.font.color.rgb.endswith("C00000")
-                for cell in payment_review_row
+                for cell in payment_review_row[:10]
             )
-            office_subtotal = next(
-                row
-                for row in invoice_classification.iter_rows(min_row=2)
-                if row[0].value == "小计" and row[5].value == "办公费"
-            )
-            assert office_subtotal[24].value == 1
-            assert office_subtotal[25].value == 20
-            assert office_subtotal[26].value == 1
-            assert office_subtotal[27].value == 30
-            assert office_subtotal[28].value == -10
-            assert office_subtotal[29].value == "金额不一致"
-            assert office_subtotal[0].fill.fgColor.rgb.endswith("FCE8E6")
+            merged_ranges = {
+                str(cell_range) for cell_range in invoice_classification.merged_cells.ranges
+            }
+            assert {f"{column}2:{column}3" for column in "KLMN"} <= merged_ranges
+            assert not any("4" in cell_range for cell_range in merged_ranges)
+            assert invoice_classification["K2"].value == "张三"
+            assert invoice_classification["L2"].value == "办公费 / 打印纸"
+            assert invoice_classification["M2"].value == "打印纸采购"
+            assert invoice_classification["N2"].value == 25
+            assert payment_classification["K2"].value == "张三"
+            assert payment_classification["L2"].value == "办公费 / 打印纸"
+            assert payment_classification["N2"].value == 30
+            assert invoice_classification["L4"].value == "待分类"
+            assert invoice_classification["N4"].value is None
+            assert invoice_classification["N4"].comment is not None
+            assert payment_classification["L3"].value == "待分类"
+            assert "币种" not in (payment_classification["J3"].value or "")
+            assert payment_classification["N3"].value == 12
+            assert payment_classification["N3"].comment is None
+            assert classification_audit["I2"].value == "测试分类依据"
+            assert classification_audit["J2"].value == "RULE"
             for worksheet in workbook.worksheets:
                 assert worksheet.freeze_panes == "A2"
+            assert invoice_classification.auto_filter.ref is None
+            assert payment_classification.auto_filter.ref is None
+            for worksheet in (original, invoice, payment, exception, classification_audit):
                 assert worksheet.auto_filter.ref is not None
     finally:
         app.dependency_overrides.clear()
         await engine.dispose()
+
+
+def test_classification_group_writes_summary_without_payment_subject():
+    batch = ProcessingBatch(
+        id=1,
+        employee_name="张三",
+        expense_month=date(2025, 7, 1),
+        status=BatchStatus.COMPLETED,
+    )
+    document = SourceDocument(
+        id=1,
+        batch_id=1,
+        source_folder=SourceFolder.INVOICE,
+        relative_path="发票/a.pdf",
+        file_name="a.pdf",
+        file_type="pdf",
+        file_size=1,
+        file_hash="a" * 64,
+        document_type=DocumentType.ELECTRONIC_INVOICE,
+        processing_status=ProcessingStatus.RECOGNIZED,
+        amount=Decimal("10.00"),
+        currency="CNY",
+    )
+    decision = FilterDecision(
+        document_id=1,
+        outcome=FilterOutcome.KEEP,
+        reason_code="BUSINESS_EXPENSE",
+        reason="测试原因",
+        evidence="测试证据",
+        buyer_name=None,
+        buyer_tax_id=None,
+        confidence=0.95,
+        company_profile_version=None,
+    )
+    classification = ExpenseClassification(
+        document_id=1,
+        expense_type="办公费",
+        standard_subcategory="文具",
+        expense_item="签字笔",
+        hospitality_target="",
+        status=ExpenseClassificationStatus.CLASSIFIED,
+        confidence=0.95,
+        evidence="测试分类依据",
+        evidence_source="RULE",
+    )
+    classifications = {1: classification}
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.append(_classification_headers(SourceFolder.INVOICE))
+
+    row_count = _append_classification_worksheet(
+        worksheet,
+        batch=batch,
+        documents=[document],
+        decision_by_document={1: decision},
+        classification_by_document=classifications,
+        groups=build_expense_summary_groups([document], classifications),
+        source_folder=SourceFolder.INVOICE,
+    )
+
+    assert row_count == 1
+    assert not worksheet.merged_cells.ranges
+    assert worksheet.max_column == 14
+    assert "支付主体" not in [cell.value for cell in worksheet[1]]
+    assert worksheet["K2"].value == "张三"
+    assert worksheet["L2"].value == "办公费 / 文具"
+    assert worksheet["M2"].value == "签字笔"
+    assert worksheet["N2"].value == 10
+    assert worksheet.auto_filter.ref is None
 
 
 async def test_review_reference_upload_versions_list_and_download():

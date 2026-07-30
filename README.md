@@ -282,7 +282,7 @@ docker compose ps
     └── 价税合计 (total_with_tax)
 ```
 
-月度资料公开字段按类型统一为：`document_date`、`counterparty`、`description`、`amount`、`currency`、`invoice_number`、`transaction_number`；完整候选字段和多笔交易保存在 `extracted_fields_json`。金额在 API 中以十进制字符串返回。
+月度资料公开字段按类型统一为：`document_date`、`counterparty`、`description`、`amount`、`invoice_number`、`transaction_number`；完整候选字段和多笔交易保存在 `extracted_fields_json`。批次资料统一按人民币处理，不提取或返回币种；金额在 API 中以十进制字符串返回。
 
 其中 `description` 是批次资料的“摘要”字段：模型可用时，模型仅根据 OCR/PDF 正文生成交易或资料摘要；模型不可用或字段提取失败时，系统以 OCR 文本的第一条非空行作为降级摘要（最多 500 字符）。文件名和目录名不参与摘要生成。摘要为空不会单独阻止发票类资料进入已识别状态。
 
@@ -371,6 +371,7 @@ GET  /api/batches
 GET  /api/batches/{id}
 GET  /api/batches/{id}/documents
 GET  /api/batches/{id}/export/excel
+POST /api/batches/{id}/export/filtered
 POST /api/batches/{id}/reprocess
 ```
 
@@ -399,6 +400,10 @@ POST /api/batches/{id}/reprocess
 `POST /api/batches` 成功返回 `202` 和 `Location: /api/batches/{id}`；路径/文件业务校验失败返回 `400`，表单格式失败返回 `422`，批次不存在返回 `404`。列表统一返回 `{items,total,page,page_size}`。
 
 `GET /api/batches/{id}/export/excel` 下载当前批次的全部文档记录，不受文档分页影响；不存在的批次返回 `404`。前端仅在批次进入终态（`COMPLETED` 或 `FAILED`）后启用导出按钮。
+
+`POST /api/batches/{id}/export/filtered` 生成审核及分类汇总工作簿，共 7 张工作表。`发票补票_分类汇总` 和 `支付凭证_分类汇总` 按费用组连续排列 A:J 单据明细，并把 K:N 的申请人、费用类型、费用详细事项和合计金额纵向合并到对应明细行；发票与支付分别汇总，不做跨来源差额判断。分类汇总不推断支付主体；全部金额按人民币单币种口径汇总，不展示币种、不按币种拆组，金额缺失时合计留空并提示。分类表为保护合并结构不提供筛选，分类技术信息统一保存在 `分类审计明细`，所有结果均在导出时重新计算，不写入数据库。
+
+费用分类规则 2.0 优先使用 `差旅费、交通费、快递费、物流费、项目成本、招待费、职工福利费`，并继续支持办公费及其他明确费用类型。历史名称“福利费”等统一显示为“职工福利费”；“合计”仅用于金额汇总，“合计”和“会计”都不会作为费用类型，辅助表出现这些标签时会忽略标签并重新分类。
 
 完整 API 文档请访问 http://localhost:18080/docs
 

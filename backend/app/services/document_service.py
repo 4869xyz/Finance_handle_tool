@@ -53,7 +53,6 @@ class ExtractionModel(BaseModel):
     counterparty: str | None
     description: str | None
     amount: Decimal | None
-    currency: str | None
     invoice_number: str | None
     transaction_number: str | None
     provider: str | None
@@ -82,7 +81,6 @@ class ExtractionModel(BaseModel):
     @field_validator(
         "counterparty",
         "description",
-        "currency",
         "invoice_number",
         "transaction_number",
         "provider",
@@ -112,7 +110,6 @@ class DocumentProcessingResult:
     counterparty: str | None = None
     description: str | None = None
     amount: Decimal | None = None
-    currency: str | None = None
     invoice_number: str | None = None
     transaction_number: str | None = None
     extracted_fields_json: dict[str, Any] | None = None
@@ -184,7 +181,6 @@ _EXTRACTION_FIELDS = {
     "counterparty",
     "description",
     "amount",
-    "currency",
     "invoice_number",
     "transaction_number",
     "provider",
@@ -418,7 +414,6 @@ def extract_fields_by_rules(text: str, ocr_confidence: float) -> ExtractionModel
         ],
         text,
     )
-    currency = "CNY" if re.search(r"[¥￥]|人民币|\bCNY\b|\bRMB\b", text, re.IGNORECASE) else None
     lines = [line.strip() for line in text.splitlines() if line.strip()]
 
     return ExtractionModel(
@@ -426,7 +421,6 @@ def extract_fields_by_rules(text: str, ocr_confidence: float) -> ExtractionModel
         counterparty=seller,
         description=lines[0][:500] if lines else None,
         amount=_decimal_or_none(amount_value),
-        currency=currency,
         invoice_number=invoice_number,
         transaction_number=transaction_number,
         provider=seller,
@@ -446,7 +440,6 @@ def extract_fields_by_rules(text: str, ocr_confidence: float) -> ExtractionModel
 def _map_public_fields(
     document_type: DocumentType,
     extraction: ExtractionModel,
-    source_text: str,
 ) -> dict[str, Any]:
     if document_type in INVOICE_TYPES:
         amount = extraction.total_with_tax or extraction.aggregate_amount or extraction.amount
@@ -464,28 +457,11 @@ def _map_public_fields(
         amount = extraction.aggregate_amount or extraction.amount
         counterparty = extraction.merchant or extraction.counterparty
 
-    explicit_currency = extraction.currency.upper() if extraction.currency else None
-    currency_evidence = {
-        "CNY": r"[¥￥]|人民币|\bCNY\b|\bRMB\b",
-        "USD": r"\bUSD\b|US\$|美元",
-        "EUR": r"\bEUR\b|€|欧元",
-        "HKD": r"\bHKD\b|港币|港元|HK\$",
-        "JPY": r"\bJPY\b|日元|円",
-    }
-    if explicit_currency:
-        evidence_pattern = currency_evidence.get(
-            explicit_currency,
-            rf"\b{re.escape(explicit_currency)}\b",
-        )
-        if not re.search(evidence_pattern, source_text, re.IGNORECASE):
-            explicit_currency = None
-
     return {
         "document_date": extraction.document_date,
         "counterparty": counterparty,
         "description": extraction.description,
         "amount": abs(amount) if amount is not None else None,
-        "currency": explicit_currency,
         "invoice_number": extraction.invoice_number,
         "transaction_number": (
             extraction.order_number
@@ -670,7 +646,7 @@ def process_document_content(
     else:
         extraction = extract_fields_by_rules(raw_text, ocr_confidence)
 
-    mapped = _map_public_fields(document_type, extraction, raw_text)
+    mapped = _map_public_fields(document_type, extraction)
     result.extracted_fields_json = extraction.model_dump(mode="json")
     for key, value in mapped.items():
         setattr(result, key, value)

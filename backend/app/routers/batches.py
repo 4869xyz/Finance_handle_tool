@@ -50,7 +50,6 @@ from app.services.batch_service import (
 )
 from app.services.exclusion_service import FilterOutcome, filter_documents
 from app.services.expense_classification_service import (
-    EXPENSE_CLASSIFICATION_RULE_VERSION,
     ExpenseClassificationStatus,
     build_expense_summary_groups,
     classification_risk_reason,
@@ -128,7 +127,6 @@ EXPORT_HEADERS = [
     "对方",
     "摘要",
     "金额",
-    "币种",
     "发票号码",
     "交易/订单号",
     "类型置信度",
@@ -151,39 +149,47 @@ FILTER_HEADERS = [
     "辅助匹配依据",
 ]
 
-CLASSIFICATION_HEADERS = [
-    "行类型",
+CLASSIFICATION_AUDIT_HEADERS = [
     "序号",
     "资料日期",
-    "员工姓名",
     "来源",
+    "文件名",
     "费用类型",
     "标准子类",
-    "事项",
-    "招待对象",
-    "金额",
-    "币种",
-    "对方",
-    "资料类型",
-    "发票号码",
-    "交易/订单号",
-    "文件名",
-    "筛选结论",
-    "风险说明",
     "分类状态",
     "分类置信度",
     "分类依据",
+    "分类依据来源",
+    "分类错误代码",
     "辅助表版本",
     "辅助匹配依据",
     "核对键",
-    "发票补票单据数",
-    "发票补票金额",
-    "支付凭证单据数",
-    "支付凭证金额",
-    "差额（发票-支付）",
-    "核对状态",
     "分类规则版本",
 ]
+
+
+def _classification_headers(source_folder: SourceFolder) -> list[str]:
+    identifier_header = (
+        "交易/订单号"
+        if source_folder == SourceFolder.PAYMENT_EVIDENCE
+        else "发票号码"
+    )
+    return [
+        "序号",
+        "资料日期",
+        "来源",
+        "费用类型",
+        "事项",
+        "金额",
+        "对方",
+        identifier_header,
+        "文件名",
+        "风险说明",
+        "申请人",
+        "费用类型",
+        "费用详细事项",
+        "合计金额",
+    ]
 
 
 def _safe_export_filename(employee_name: str, expense_month: date) -> str:
@@ -220,7 +226,6 @@ def _document_export_row(batch: ProcessingBatch, document: SourceDocument, index
         document.counterparty or "",
         document.description or "",
         float(document.amount) if document.amount is not None else None,
-        document.currency or "",
         document.invoice_number or "",
         document.transaction_number or "",
         (
@@ -265,10 +270,10 @@ def _configure_export_worksheet(worksheet, *, header_fill_color: str = "1677FF")
     column_widths = {
         "A": 8, "B": 14, "C": 12, "D": 10, "E": 12, "F": 28,
         "G": 42, "H": 18, "I": 14, "J": 34, "K": 42, "L": 13,
-        "M": 24, "N": 36, "O": 14, "P": 10, "Q": 20, "R": 22,
-        "S": 14, "T": 14, "U": 12, "V": 20, "W": 12, "X": 32,
-        "Y": 34, "Z": 42, "AA": 24, "AB": 22, "AC": 14,
-        "AD": 14, "AE": 12, "AF": 12, "AG": 52,
+        "M": 24, "N": 36, "O": 14, "P": 20, "Q": 22, "R": 14,
+        "S": 14, "T": 12, "U": 20, "V": 12, "W": 32, "X": 34,
+        "Y": 42, "Z": 24, "AA": 22, "AB": 14, "AC": 14,
+        "AD": 12, "AE": 12, "AF": 52,
     }
     for column, width in column_widths.items():
         if worksheet.max_column >= _column_index(column):
@@ -277,16 +282,16 @@ def _configure_export_worksheet(worksheet, *, header_fill_color: str = "1677FF")
     for row in worksheet.iter_rows(min_row=2):
         for cell in row:
             cell.alignment = Alignment(vertical="top")
-        for column_index in (6, 9, 10, 13, 24, 25, 32):
+        for column_index in (6, 9, 10, 13, 23, 24, 31):
             if column_index < len(row):
                 row[column_index].alignment = Alignment(vertical="top", wrap_text=True)
         row[11].number_format = "yyyy-mm-dd"
         row[14].number_format = "#,##0.00"
+        row[17].number_format = "0.0%"
         row[18].number_format = "0.0%"
-        row[19].number_format = "0.0%"
-        row[21].number_format = "yyyy-mm-dd hh:mm:ss"
-        if len(row) >= 29:
-            row[28].number_format = "0.0%"
+        row[20].number_format = "yyyy-mm-dd hh:mm:ss"
+        if len(row) >= 28:
+            row[27].number_format = "0.0%"
 
 
 def _append_filter_row(worksheet, base_row: list, decision):
@@ -313,18 +318,56 @@ def _safe_excel_text(value):
     return value
 
 
-def _configure_classification_worksheet(worksheet):
+def _configure_classification_worksheet(worksheet) -> None:
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    worksheet.sheet_view.showGridLines = False
+    worksheet.freeze_panes = "A2"
+    worksheet.auto_filter.ref = None
+
+    detail_header_fill = PatternFill("solid", fgColor="531DAB")
+    summary_header_fill = PatternFill("solid", fgColor="389E0D")
+    header_font = Font(bold=True, color="FFFFFF")
+    for column in range(1, 11):
+        cell = worksheet.cell(row=1, column=column)
+        cell.fill = detail_header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    for column in range(11, 15):
+        cell = worksheet.cell(row=1, column=column)
+        cell.fill = summary_header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    worksheet.row_dimensions[1].height = 28
+
+    widths = {
+        "A": 8, "B": 13, "C": 10, "D": 14, "E": 34,
+        "F": 14, "G": 24, "H": 22, "I": 30, "J": 42,
+        "K": 14, "L": 22, "M": 34, "N": 16,
+    }
+    for column, width in widths.items():
+        worksheet.column_dimensions[column].width = width
+
+    for row in worksheet.iter_rows(min_row=2):
+        for index in range(10):
+            row[index].alignment = Alignment(vertical="top")
+        for index in (4, 6, 8, 9):
+            row[index].alignment = Alignment(vertical="top", wrap_text=True)
+        row[1].number_format = "yyyy-mm-dd"
+        row[5].number_format = "#,##0.00"
+
+
+def _configure_classification_audit_worksheet(worksheet):
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
 
     worksheet.sheet_view.showGridLines = False
     worksheet.freeze_panes = "A2"
-    worksheet.sheet_properties.outlinePr.summaryBelow = True
     worksheet.auto_filter.ref = (
         f"A1:{get_column_letter(worksheet.max_column)}{max(1, worksheet.max_row)}"
     )
 
-    header_fill = PatternFill("solid", fgColor="531DAB")
+    header_fill = PatternFill("solid", fgColor="595959")
     header_font = Font(bold=True, color="FFFFFF")
     for cell in worksheet[1]:
         cell.fill = header_fill
@@ -333,12 +376,9 @@ def _configure_classification_worksheet(worksheet):
     worksheet.row_dimensions[1].height = 28
 
     widths = {
-        "A": 10, "B": 8, "C": 13, "D": 14, "E": 10, "F": 14,
-        "G": 14, "H": 34, "I": 20, "J": 14, "K": 12, "L": 24,
-        "M": 18, "N": 20, "O": 22, "P": 30, "Q": 12, "R": 42,
-        "S": 16, "T": 14, "U": 42, "V": 12, "W": 52, "X": 38,
-        "Y": 16, "Z": 16, "AA": 18, "AB": 18, "AC": 18,
-        "AD": 16, "AE": 14,
+        "A": 8, "B": 13, "C": 10, "D": 30, "E": 14,
+        "F": 14, "G": 16, "H": 14, "I": 42, "J": 18,
+        "K": 24, "L": 12, "M": 52, "N": 38, "O": 14,
     }
     for column, width in widths.items():
         worksheet.column_dimensions[column].width = width
@@ -346,12 +386,10 @@ def _configure_classification_worksheet(worksheet):
     for row in worksheet.iter_rows(min_row=2):
         for cell in row:
             cell.alignment = Alignment(vertical="top")
-        for index in (7, 8, 11, 15, 17, 20, 22, 23):
+        for index in (3, 8, 9, 10, 12, 13):
             row[index].alignment = Alignment(vertical="top", wrap_text=True)
-        row[2].number_format = "yyyy-mm-dd"
-        for index in (9, 25, 27, 28):
-            row[index].number_format = "#,##0.00"
-        row[19].number_format = "0.0%"
+        row[1].number_format = "yyyy-mm-dd"
+        row[7].number_format = "0.0%"
 
 
 def _append_classification_worksheet(
@@ -364,21 +402,39 @@ def _append_classification_worksheet(
     groups: list,
     source_folder: SourceFolder,
 ):
-    from openpyxl.styles import Font, PatternFill
+    from openpyxl.comments import Comment
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
     document_by_id = {document.id: document for document in documents}
+    is_payment = source_folder == SourceFolder.PAYMENT_EVIDENCE
     detail_count = 0
-    detail_index = 1
-    subtotal_fill = PatternFill("solid", fgColor="E6F4FF")
-    exception_fill = PatternFill("solid", fgColor="FCE8E6")
-    total_fill = PatternFill("solid", fgColor="D3ADF7")
 
-    for group in groups:
-        document_ids = (
+    def source_document_ids(group) -> list[int]:
+        return (
             group.payment_document_ids
-            if source_folder == SourceFolder.PAYMENT_EVIDENCE
+            if is_payment
             else group.invoice_document_ids
         )
+
+    def source_amount(group) -> Decimal:
+        return group.payment_amount if is_payment else group.invoice_amount
+
+    def source_missing_amount(group) -> bool:
+        return group.payment_missing_amount if is_payment else group.invoice_missing_amount
+
+    summary_fill = PatternFill("solid", fgColor="E2F0D9")
+    missing_fill = PatternFill("solid", fgColor="FCE8E6")
+    thin_border = Border(
+        left=Side(style="thin", color="A6A6A6"),
+        right=Side(style="thin", color="A6A6A6"),
+        top=Side(style="thin", color="A6A6A6"),
+        bottom=Side(style="thin", color="A6A6A6"),
+    )
+
+    for group in groups:
+        document_ids = source_document_ids(group)
+        if not document_ids:
+            continue
         group_documents = sorted(
             (document_by_id[document_id] for document_id in document_ids),
             key=lambda document: (
@@ -386,166 +442,129 @@ def _append_classification_worksheet(
                 document.id,
             ),
         )
-        detail_start = worksheet.max_row + 1
+        detail_start = detail_count + 2
         for document in group_documents:
             decision = decision_by_document[document.id]
             classification = classification_by_document[document.id]
+            identifier = (
+                document.transaction_number if is_payment else document.invoice_number
+            )
             risk_reason = classification_risk_reason(
                 document,
                 decision,
                 classification,
             )
             worksheet.append([
-                "明细",
-                detail_index,
+                detail_count + 1,
                 document.document_date,
-                batch.employee_name,
                 SOURCE_FOLDER_LABELS.get(document.source_folder, document.source_folder.value),
                 classification.expense_type,
-                classification.standard_subcategory,
                 classification.expense_item,
-                classification.hospitality_target,
                 float(document.amount) if document.amount is not None else None,
-                document.currency or "币种待确认",
                 document.counterparty or "",
-                DOCUMENT_TYPE_LABELS.get(document.document_type, document.document_type.value),
-                document.invoice_number or "",
-                document.transaction_number or "",
+                identifier or "",
                 document.file_name,
-                decision.outcome.value,
                 risk_reason,
-                classification.status.value,
-                classification.confidence,
-                classification.evidence,
-                classification.reference_version,
-                classification.reference_evidence or decision.reference_evidence,
-                classification.reconciliation_key,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                classification.rule_version,
             ])
             detail_row = worksheet.max_row
-            worksheet.row_dimensions[detail_row].outlineLevel = 1
             if risk_reason:
-                for cell in worksheet[detail_row]:
+                for cell in worksheet[detail_row][:10]:
                     red_font = copy(cell.font)
                     red_font.color = "C00000"
                     cell.font = red_font
-            for cell in worksheet[detail_row]:
+            for cell in worksheet[detail_row][:10]:
                 cell.value = _safe_excel_text(cell.value)
             detail_count += 1
-            detail_index += 1
+        detail_end = detail_count + 1
 
-        worksheet.append([
-            "小计",
-            None,
-            None,
+        expense_type = group.expense_type
+        if group.standard_subcategory:
+            expense_type = f"{expense_type} / {group.standard_subcategory}"
+        expense_detail = group.expense_item or "待补充事项"
+        if group.expense_type == "招待费" and group.hospitality_target:
+            expense_detail = (
+                f"{expense_detail}；招待对象：{group.hospitality_target}"
+            )
+        summary_values = [
             batch.employee_name,
-            "发票补票/支付凭证",
-            group.expense_type,
-            group.standard_subcategory,
-            group.expense_item,
-            group.hospitality_target,
-            None,
-            group.currency,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            len(group.invoice_document_ids),
-            float(group.invoice_amount),
-            len(group.payment_document_ids),
-            float(group.payment_amount),
-            float(group.difference),
-            group.reconciliation_status,
-            EXPENSE_CLASSIFICATION_RULE_VERSION,
-        ])
-        subtotal_row = worksheet.max_row
-        for cell in worksheet[subtotal_row]:
-            cell.fill = (
-                subtotal_fill
-                if group.reconciliation_status == "金额一致"
-                else exception_fill
-            )
-            cell.font = Font(
-                bold=True,
-                color=(
-                    "389E0D"
-                    if group.reconciliation_status == "金额一致"
-                    else "C00000"
-                ),
-            )
-            cell.value = _safe_excel_text(cell.value)
-        if group_documents:
-            worksheet.row_dimensions.group(
-                detail_start,
-                subtotal_row - 1,
-                outline_level=1,
-                hidden=False,
-            )
-
-    currencies = sorted({group.currency for group in groups})
-    for currency in currencies:
-        currency_groups = [group for group in groups if group.currency == currency]
-        invoice_ids = [
-            document_id
-            for group in currency_groups
-            for document_id in group.invoice_document_ids
+            expense_type,
+            expense_detail,
+            None if source_missing_amount(group) else float(source_amount(group)),
         ]
-        payment_ids = [
-            document_id
-            for group in currency_groups
-            for document_id in group.payment_document_ids
-        ]
-        invoice_amount = sum(
-            (group.invoice_amount for group in currency_groups),
-            Decimal("0.00"),
-        )
-        payment_amount = sum(
-            (group.payment_amount for group in currency_groups),
-            Decimal("0.00"),
-        )
-        missing_amount = any(
-            group.invoice_missing_amount or group.payment_missing_amount
-            for group in currency_groups
-        )
-        if currency == "币种待确认" or missing_amount:
-            status = "金额待确认"
-        elif not invoice_ids:
-            status = "缺发票补票"
-        elif not payment_ids:
-            status = "缺支付凭证"
-        elif invoice_amount == payment_amount:
-            status = "金额一致"
-        else:
-            status = "金额不一致"
-        worksheet.append([
-            "总计", None, None, batch.employee_name, "发票补票/支付凭证",
-            "按币种总计", "", "", "", None, currency,
-            "", "", "", "", "", "", "", "", None, "", None, "", "",
-            len(invoice_ids), float(invoice_amount), len(payment_ids),
-            float(payment_amount), float(invoice_amount - payment_amount), status,
-            EXPENSE_CLASSIFICATION_RULE_VERSION,
-        ])
-        for cell in worksheet[worksheet.max_row]:
-            cell.fill = total_fill
-            cell.font = Font(bold=True, color="531DAB")
+        for row_number in range(detail_start, detail_end + 1):
+            for column in range(11, 15):
+                cell = worksheet.cell(row=row_number, column=column)
+                cell.fill = summary_fill
+                cell.border = thin_border
+        for offset, value in enumerate(summary_values, start=11):
+            cell = worksheet.cell(
+                row=detail_start,
+                column=offset,
+                value=_safe_excel_text(value),
+            )
+            cell.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=True,
+            )
+            if offset == 14:
+                cell.number_format = "#,##0.00"
+        if detail_end > detail_start:
+            for column in range(11, 15):
+                worksheet.merge_cells(
+                    start_row=detail_start,
+                    start_column=column,
+                    end_row=detail_end,
+                    end_column=column,
+                )
+        if source_missing_amount(group):
+            amount_cell = worksheet.cell(row=detail_start, column=14)
+            amount_cell.fill = missing_fill
+            amount_cell.font = Font(color="C00000", bold=True)
+            amount_cell.comment = Comment(
+                "存在金额缺失明细，请查看左侧风险说明。",
+                "Finance Handle Tool",
+            )
 
     _configure_classification_worksheet(worksheet)
     return detail_count
+
+
+def _append_classification_audit_worksheet(
+    worksheet,
+    *,
+    documents: list[SourceDocument],
+    decision_by_document: dict,
+    classification_by_document: dict,
+) -> None:
+    from openpyxl.styles import Font
+
+    for index, document in enumerate(documents, start=1):
+        decision = decision_by_document[document.id]
+        classification = classification_by_document[document.id]
+        worksheet.append([
+            index,
+            document.document_date,
+            SOURCE_FOLDER_LABELS.get(document.source_folder, document.source_folder.value),
+            document.file_name,
+            classification.expense_type,
+            classification.standard_subcategory,
+            classification.status.value,
+            classification.confidence,
+            classification.evidence,
+            classification.evidence_source,
+            classification.error_code or "",
+            classification.reference_version,
+            classification.reference_evidence or decision.reference_evidence,
+            classification.reconciliation_key,
+            classification.rule_version,
+        ])
+        for cell in worksheet[worksheet.max_row]:
+            cell.value = _safe_excel_text(cell.value)
+            if classification.status != ExpenseClassificationStatus.CLASSIFIED:
+                cell.font = Font(color="C00000")
+
+    _configure_classification_audit_worksheet(worksheet)
 
 
 def _parse_expense_month(value: str) -> date:
@@ -802,100 +821,16 @@ async def export_batch_documents_excel(
     documents = result.scalars().all()
 
     from openpyxl import Workbook
-    from openpyxl.styles import Alignment, Font, PatternFill
 
     workbook = Workbook()
     worksheet = workbook.active
     worksheet.title = "识别结果"
-    worksheet.sheet_view.showGridLines = False
-    worksheet.freeze_panes = "A2"
     worksheet.append(EXPORT_HEADERS)
 
-    header_fill = PatternFill("solid", fgColor="1677FF")
-    header_font = Font(bold=True, color="FFFFFF")
-    for cell in worksheet[1]:
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-    worksheet.row_dimensions[1].height = 26
-
     for index, document in enumerate(documents, start=1):
-        worksheet.append([
-            index,
-            batch.employee_name,
-            batch.expense_month.strftime("%Y-%m"),
-            batch.id,
-            SOURCE_FOLDER_LABELS.get(document.source_folder, document.source_folder.value),
-            document.file_name,
-            document.relative_path,
-            DOCUMENT_TYPE_LABELS.get(document.document_type, document.document_type.value),
-            PROCESSING_STATUS_LABELS.get(
-                document.processing_status,
-                document.processing_status.value,
-            ),
-            STATUS_REASON_LABELS.get(document.status_reason, document.status_reason or ""),
-            document.status_detail or "",
-            document.document_date,
-            document.counterparty or "",
-            document.description or "",
-            float(document.amount) if document.amount is not None else None,
-            document.currency or "",
-            document.invoice_number or "",
-            document.transaction_number or "",
-            (
-                float(document.classification_confidence)
-                if document.classification_confidence is not None
-                else None
-            ),
-            (
-                float(document.extraction_confidence)
-                if document.extraction_confidence is not None
-                else None
-            ),
-            document.processing_attempts,
-            document.updated_at,
-        ])
+        worksheet.append(_document_export_row(batch, document, index))
 
-    worksheet.auto_filter.ref = f"A1:V{max(1, worksheet.max_row)}"
-    column_widths = {
-        "A": 8,
-        "B": 14,
-        "C": 12,
-        "D": 10,
-        "E": 12,
-        "F": 28,
-        "G": 42,
-        "H": 18,
-        "I": 14,
-        "J": 34,
-        "K": 42,
-        "L": 13,
-        "M": 24,
-        "N": 36,
-        "O": 14,
-        "P": 10,
-        "Q": 20,
-        "R": 22,
-        "S": 14,
-        "T": 14,
-        "U": 12,
-        "V": 20,
-    }
-    for column, width in column_widths.items():
-        worksheet.column_dimensions[column].width = width
-
-    for row in worksheet.iter_rows(min_row=2):
-        for cell in row:
-            cell.alignment = Alignment(vertical="top")
-        row[6].alignment = Alignment(vertical="top", wrap_text=True)
-        row[9].alignment = Alignment(vertical="top", wrap_text=True)
-        row[10].alignment = Alignment(vertical="top", wrap_text=True)
-        row[13].alignment = Alignment(vertical="top", wrap_text=True)
-        row[11].number_format = "yyyy-mm-dd"
-        row[14].number_format = "#,##0.00"
-        row[18].number_format = "0.0%"
-        row[19].number_format = "0.0%"
-        row[21].number_format = "yyyy-mm-dd hh:mm:ss"
+    _configure_export_worksheet(worksheet)
 
     output = BytesIO()
     workbook.save(output)
@@ -975,9 +910,13 @@ async def export_filtered_batch_documents_excel(
     exception_sheet = workbook.create_sheet("排除与待复核")
     exception_sheet.append(EXPORT_HEADERS + FILTER_HEADERS)
     invoice_classification_sheet = workbook.create_sheet("发票补票_分类汇总")
-    invoice_classification_sheet.append(CLASSIFICATION_HEADERS)
+    invoice_classification_sheet.append(_classification_headers(SourceFolder.INVOICE))
     payment_classification_sheet = workbook.create_sheet("支付凭证_分类汇总")
-    payment_classification_sheet.append(CLASSIFICATION_HEADERS)
+    payment_classification_sheet.append(
+        _classification_headers(SourceFolder.PAYMENT_EVIDENCE)
+    )
+    classification_audit_sheet = workbook.create_sheet("分类审计明细")
+    classification_audit_sheet.append(CLASSIFICATION_AUDIT_HEADERS)
 
     for index, document in enumerate(documents, start=1):
         base_row = _document_export_row(batch, document, index)
@@ -1004,7 +943,11 @@ async def export_filtered_batch_documents_excel(
     exclude_fill = PatternFill("solid", fgColor="FCE8E6")
     review_fill = PatternFill("solid", fgColor="FFF4CC")
     for row in exception_sheet.iter_rows(min_row=2):
-        fill = exclude_fill if row[22].value == FilterOutcome.EXCLUDE.value else review_fill
+        fill = (
+            exclude_fill
+            if row[len(EXPORT_HEADERS)].value == FilterOutcome.EXCLUDE.value
+            else review_fill
+        )
         for cell in row:
             cell.fill = fill
 
@@ -1035,6 +978,12 @@ async def export_filtered_batch_documents_excel(
         groups=summary_groups,
         source_folder=SourceFolder.PAYMENT_EVIDENCE,
     )
+    _append_classification_audit_worksheet(
+        classification_audit_sheet,
+        documents=documents,
+        decision_by_document=decision_by_document,
+        classification_by_document=classification_by_document,
+    )
     expected_invoice_rows = sum(
         document.source_folder
         in {SourceFolder.INVOICE, SourceFolder.REPLACEMENT_INVOICE}
@@ -1048,6 +997,8 @@ async def export_filtered_batch_documents_excel(
         raise HTTPException(status_code=500, detail="发票补票分类明细行数对账失败")
     if payment_classification_rows != expected_payment_rows:
         raise HTTPException(status_code=500, detail="支付凭证分类明细行数对账失败")
+    if classification_audit_sheet.max_row - 1 != len(documents):
+        raise HTTPException(status_code=500, detail="分类审计明细行数对账失败")
 
     output = BytesIO()
     workbook.save(output)

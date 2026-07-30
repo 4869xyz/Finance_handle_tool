@@ -14,8 +14,10 @@ from app.services import expense_classification_service as service
 from app.services.expense_classification_service import (
     ExpenseClassificationStatus,
     build_expense_summary_groups,
+    classification_risk_reason,
     classify_expense_by_rule,
     classify_expenses,
+    normalize_expense_type,
 )
 from app.services.review_reference_service import parse_review_reference
 
@@ -73,12 +75,19 @@ def test_employee_meal_is_welfare_and_hospitality_requires_target():
     welfare = classify_expense_by_rule(document(description="程序组加班点餐"))
     hospitality = classify_expense_by_rule(document(2, description="客户接待吃饭"))
 
-    assert welfare.expense_type == "福利费"
+    assert welfare.expense_type == "职工福利费"
     assert welfare.standard_subcategory == "员工活动"
     assert hospitality.expense_type == "招待费"
     assert hospitality.standard_subcategory == "餐饮"
     assert hospitality.hospitality_target == "待补充"
     assert hospitality.status == ExpenseClassificationStatus.HOSPITALITY_TARGET_REQUIRED
+
+
+def test_expense_type_normalization_uses_welfare_name_and_rejects_totals():
+    assert normalize_expense_type("福利费") == "职工福利费"
+    assert normalize_expense_type("员工福利费") == "职工福利费"
+    assert normalize_expense_type("合计") == "待分类"
+    assert normalize_expense_type("会计") == "待分类"
 
 
 def test_explicit_transport_takes_priority_over_employee_context():
@@ -122,6 +131,29 @@ def test_strong_reference_match_preserves_custom_expense_type_and_item():
     assert result.evidence_source == "AUXILIARY_TABLE"
     assert result.reference_version == 3
     assert result.reconciliation_key == "辅助表v3|明细|第2行"
+
+
+def test_reference_total_label_is_ignored_and_document_is_reclassified():
+    invoice = document(description="打印纸采购")
+    invoice.invoice_number = "INV-TOTAL-001"
+    reference = BatchReviewReference(
+        version=4,
+        parsed_rows=[{
+            "sheet": "汇总",
+            "row": 2,
+            "text": "INV-TOTAL-001 | 合计 | 打印纸采购",
+            "normalized": "invtotal001合计打印纸采购",
+            "fields": {
+                "expense_type": "合计",
+                "expense_item": "打印纸采购",
+            },
+        }],
+    )
+
+    result = classify_expenses([invoice], reference)[invoice.id]
+
+    assert result.expense_type == "办公费"
+    assert result.evidence_source == "RULE"
 
 
 def test_reference_parser_keeps_classification_columns_from_sample_shape():
@@ -189,7 +221,67 @@ def test_low_confidence_model_suggestion_is_kept_but_marked_for_review(monkeypat
     ]
 
 
-def test_summary_groups_reconcile_sources_without_cross_currency_sum():
+def test_forbidden_model_expense_types_become_unclassified(monkeypatch):
+    class FakeProvider:
+        def __init__(self):
+            self.expense_type = "合计"
+
+        def chat_completion(self, _system, _prompt, **_kwargs):
+            return (
+                '{"items":[{"document_id":1,"expense_type":"'
+                + self.expense_type
+                + '","standard_subcategory":"","expense_item":"采购",'
+                '"hospitality_target":null,"confidence":0.99,'
+                '"evidence":"模型判断","evidence_source":"DOCUMENT_BODY"}]}'
+            )
+
+    provider = FakeProvider()
+
+    class FakeLlmService:
+        is_available = True
+        active_provider = provider
+
+    monkeypatch.setattr(service, "get_llm_service", lambda: FakeLlmService())
+
+    for forbidden_type in ("合计", "会计"):
+        provider.expense_type = forbidden_type
+        result = classify_expenses([document(description="一次无法判断的购买")])[1]
+        assert result.expense_type == "待分类"
+        assert result.status == ExpenseClassificationStatus.UNCLASSIFIED
+        assert result.error_code == "INVALID_CLASSIFICATION_RESPONSE"
+
+
+def test_summary_groups_use_screenshot_category_order_before_office_fee():
+    documents = [
+        document(1, description="出差住宿"),
+        document(2, description="滴滴打车"),
+        document(3, description="顺丰快递"),
+        document(4, description="货拉拉物流"),
+        document(5, description="项目采购服务器"),
+        document(6, description="客户接待吃饭"),
+        document(7, description="程序组加班点餐"),
+        document(8, description="打印纸采购"),
+    ]
+    classifications = {
+        item.id: classify_expense_by_rule(item)
+        for item in documents
+    }
+
+    groups = build_expense_summary_groups(documents, classifications)
+
+    assert [group.expense_type for group in groups] == [
+        "差旅费",
+        "交通费",
+        "快递费",
+        "物流费",
+        "项目成本",
+        "招待费",
+        "职工福利费",
+        "办公费",
+    ]
+
+
+def test_summary_groups_ignore_legacy_currency_values_in_rmb_mode():
     invoice = document(description="打印纸采购", amount="88.50")
     payment = document(
         2,
@@ -210,13 +302,32 @@ def test_summary_groups_reconcile_sources_without_cross_currency_sum():
     classifications = classify_expenses(documents)
 
     groups = build_expense_summary_groups(documents, classifications)
-    cny = next(group for group in groups if group.currency == "CNY")
-    usd = next(group for group in groups if group.currency == "USD")
+    assert len(groups) == 1
+    group = groups[0]
+    assert group.invoice_amount == Decimal("88.50")
+    assert group.payment_amount == Decimal("88.50")
+    assert group.difference == Decimal("0.00")
+    assert group.reconciliation_status == "金额一致"
 
-    assert cny.invoice_amount == Decimal("88.50")
-    assert cny.payment_amount == Decimal("80.00")
-    assert cny.difference == Decimal("8.50")
-    assert cny.reconciliation_status == "金额不一致"
-    assert usd.invoice_amount == Decimal("0.00")
-    assert usd.payment_amount == Decimal("8.50")
-    assert usd.reconciliation_status == "缺发票补票"
+
+def test_missing_currency_is_not_a_classification_risk_in_rmb_mode():
+    complete = document(description="打印纸采购", currency=None)
+    classification = classify_expense_by_rule(complete)
+
+    assert classification is not None
+    assert classification_risk_reason(complete, object(), classification) == ""
+
+    missing_amount = document(
+        2,
+        description="打印纸采购",
+        amount=None,
+        currency=None,
+    )
+    missing_classification = classify_expense_by_rule(missing_amount)
+
+    assert missing_classification is not None
+    assert classification_risk_reason(
+        missing_amount,
+        object(),
+        missing_classification,
+    ) == "金额缺失"

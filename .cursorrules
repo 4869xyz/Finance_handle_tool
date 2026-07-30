@@ -55,4 +55,4 @@
 - **禁绝幻觉**：若发现 `plan.md` 中描述的逻辑与实际代码不符，必须立即停止并向用户报错，严禁猜测。
 - **状态转换**：在接收到“开始完成 todo / 完成计划 SOP”类指令前，Agent 严禁写入业务代码（仅允许维护 plan 与必要只读探查）。
 - **密钥安全**：禁止把真实 API Key、密码写入文档或提交示例；`.env` 仅本地使用。
-- **与 OpenSpec**：若用户明确要求 proposal/spec/openspec，优先遵循仓库 `AGENTS.md` / `openspec`；否则默认本 SOP。
+- **跨智能体协作**：`docs/plans/{Feature}_plan.md` 是单功能唯一计划源。Cursor 遵循本文件；其他智能体遵循根目录 `AGENTS.md`，两者均不得建立第二套并行计划。

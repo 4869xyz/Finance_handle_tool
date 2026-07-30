@@ -74,7 +74,6 @@ export interface SourceDocument {
   counterparty: string | null;
   description: string | null;
   amount: string | null;
-  currency: string | null;
   invoice_number: string | null;
   transaction_number: string | null;
   extracted_fields_json: Record<string, unknown> | null;

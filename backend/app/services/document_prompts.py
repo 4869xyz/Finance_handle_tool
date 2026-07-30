@@ -30,7 +30,6 @@ DOCUMENT_EXTRACTION_PROMPT = """请从以下 {document_type} 报销资料正文�
   "counterparty": "对方名称或null",
   "description": "交易或资料摘要或null",
   "amount": "资料的可信汇总金额数字或null",
-  "currency": "资料正文明确出现的币种代码或null",
   "invoice_number": "发票号码或null",
   "transaction_number": "支付交易号或订单号或null",
   "provider": "行程服务商或null",

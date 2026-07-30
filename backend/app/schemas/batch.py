@@ -62,7 +62,6 @@ class SourceDocumentResponse(BaseModel):
     counterparty: str | None = None
     description: str | None = None
     amount: Decimal | None = None
-    currency: str | None = None
     invoice_number: str | None = None
     transaction_number: str | None = None
     extracted_fields_json: dict[str, Any] | None = None

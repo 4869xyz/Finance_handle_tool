@@ -25,7 +25,6 @@ def extraction_payload(**overrides):
         "counterparty": "测试商户",
         "description": "办公用品",
         "amount": "100.00",
-        "currency": "CNY",
         "invoice_number": None,
         "transaction_number": "TX123456",
         "provider": None,
@@ -89,18 +88,11 @@ def test_type_specific_public_mapping_and_critical_fields():
     mapped = _map_public_fields(
         DocumentType.ELECTRONIC_INVOICE,
         extraction,
-        "价税合计 ￥88.60 人民币",
     )
     assert mapped["amount"] == Decimal("88.60")
     assert mapped["counterparty"] == "销售方"
+    assert "currency" not in mapped
     assert missing_critical_fields(DocumentType.ELECTRONIC_INVOICE, mapped) == []
-
-    without_currency_evidence = _map_public_fields(
-        DocumentType.ELECTRONIC_INVOICE,
-        extraction,
-        "价税合计 88.60",
-    )
-    assert without_currency_evidence["currency"] is None
 
 
 class FakeOcr:
@@ -210,9 +202,11 @@ def test_coerce_extraction_accepts_blank_strings_and_string_confidence():
         order_number="",
         trip_amount="0",
         confidence="0",
+        currency="USD",
         unexpected="drop-me",
     )
     coerced = _coerce_extraction_payload(raw)
+    assert "currency" not in coerced
     assert "unexpected" not in coerced
     parsed = ExtractionModel.model_validate(coerced)
     assert parsed.transaction_number is None

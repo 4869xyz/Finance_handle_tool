@@ -1,21 +1,10 @@
-<!-- OPENSPEC:START -->
-# OpenSpec Instructions
+## Project Workflow
 
-These instructions are for AI assistants working in this project.
-
-Always open `@/openspec/AGENTS.md` when the request:
-- Mentions planning or proposals (words like proposal, spec, change, plan)
-- Introduces new capabilities, breaking changes, architecture shifts, or big performance/security work
-- Sounds ambiguous and you need the authoritative spec before coding
-
-Use `@/openspec/AGENTS.md` to learn:
-- How to create and apply change proposals
-- Spec format and conventions
-- Project structure and guidelines
-
-Keep this managed block so 'openspec update' can refresh the instructions.
-
-<!-- OPENSPEC:END -->
+- Read `ARCHITECTURE.md` before planning changes that affect module boundaries or data flow.
+- Use `docs/plans/{Feature}_plan.md` as the single source of truth for a feature plan.
+- Read only the README files belonging to affected directories.
+- Do not create a second proposal or specification system alongside `docs/plans/`.
+- Update `VersionLog.md` for business-code, configuration, or documentation-rule changes.
 
 ## Scope & Grounding
 

@@ -366,7 +366,7 @@ export default function BatchPage() {
       dataIndex: 'amount',
       width: 130,
       align: 'right',
-      render: (value, record) => value ? `${record.currency || ''} ${value}`.trim() : '-',
+      render: (value) => value != null ? `¥${Number(value).toFixed(2)}` : '-',
     },
     { title: '发票号', dataIndex: 'invoice_number', width: 180, render: (v) => v || '-' },
     { title: '交易/订单号', dataIndex: 'transaction_number', width: 180, render: (v) => v || '-' },

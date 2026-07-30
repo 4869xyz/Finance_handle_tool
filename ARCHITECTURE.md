@@ -40,7 +40,7 @@ Finance_handle_tool/
 ├── docker-compose.yml           # 一键编排 db/backend/frontend
 ├── README.md                    # 项目对外说明与快速开始
 ├── caozuo.md                    # 本地运行备忘（端口与常用命令）
-├── AGENTS.md / CLAUDE.md        # OpenSpec / Agent 入口提示（与 Cursor 流程并存）
+├── AGENTS.md / CLAUDE.md        # 跨智能体协作规则与 Claude 入口
 │
 ├── backend/                     # FastAPI 后端
 │   ├── Dockerfile
@@ -198,6 +198,9 @@ LLM 密钥/模型：backend/.env + /api/settings
 - **批次视频**：仅存路径、大小、哈希和人工复核原因，`source_documents.file_data` 为空
 - **其他批次文件**：原始字节存 `source_documents.file_data`；哈希仅审计，不自动去重
 - **导出 CSV/Excel**：内存生成后直接下载，不落盘归档
+- **审核及分类汇总**：从 `source_documents` 和批次辅助表即时计算；两张分类表按费用组连续排列 A:J 明细，K:N 的申请人、费用类型、详细事项和来源内合计纵向合并到对应明细行，不推断支付主体，发票与支付不做跨来源差额判断；技术证据进入独立的“分类审计明细”工作表，不写回数据库
+- **人民币单币种**：批次资料不提取、不返回、不展示币种，也不按历史币种值拆分汇总；`source_documents.currency` 旧列仅为数据库兼容保留，存在金额缺失时仍不输出不完整的部分合计
+- **分类规则 2.0**：优先顺序为差旅费、交通费、快递费、物流费、项目成本、招待费、职工福利费，办公费和其他明确类型继续自适应；福利类历史名称统一归一为“职工福利费”，“合计”和“会计”属于无效费用类型，辅助表中的无效标签不参与强匹配分类
 
 ---
 
