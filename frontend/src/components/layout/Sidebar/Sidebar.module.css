@@ -18,7 +18,7 @@
 .sidebarTop {
   display: flex;
   flex-direction: column;
-  gap: 48px;
+  gap: clamp(32px, 3vw, 48px);
 }
 
 /* Logo Section */
@@ -40,6 +40,7 @@
   font-size: var(--font-size-lg);
   font-weight: var(--font-weight-semibold);
   color: var(--foreground);
+  white-space: nowrap;
 }
 
 /* Navigation Section */
@@ -86,6 +87,7 @@
   font-weight: var(--font-weight-normal);
   color: var(--muted-foreground);
   transition: color var(--transition-fast);
+  white-space: nowrap;
 }
 
 .navItem.active .navLabel {
@@ -129,6 +131,7 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
 }
 
 .userName {
@@ -143,6 +146,26 @@
   font-size: 11px;
   font-weight: var(--font-weight-normal);
   color: var(--muted-foreground);
+}
+
+@media (max-width: 1440px) {
+  .logo {
+    gap: 10px;
+  }
+
+  .logoMark {
+    width: 24px;
+    height: 24px;
+  }
+
+  .logoText {
+    font-size: var(--font-size-md);
+  }
+
+  .navItem {
+    gap: 10px;
+    padding: 10px 0;
+  }
 }
 
 /* LLM Config Button */

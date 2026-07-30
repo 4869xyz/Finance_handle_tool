@@ -4,6 +4,7 @@ import UploadPage from './pages/UploadPage';
 import InvoiceListPage from './pages/InvoiceListPage';
 import InvoiceDetailPage from './pages/InvoiceDetailPage';
 import BatchPage from './pages/BatchPage';
+import CompanyProfilePage from './pages/CompanyProfilePage';
 import LLMConfigModal from './components/LLMConfigModal';
 import { MainLayout } from './components/layout';
 import { getLLMStatus } from './services/api';
@@ -49,6 +50,7 @@ function AppContent() {
         <Route path="/" element={<InvoiceListPage />} />
         <Route path="/upload" element={<UploadPage />} />
         <Route path="/batches" element={<BatchPage />} />
+        <Route path="/settings/company-profile" element={<CompanyProfilePage />} />
         <Route path="/invoices/:id" element={<InvoiceDetailPage />} />
       </Routes>
 

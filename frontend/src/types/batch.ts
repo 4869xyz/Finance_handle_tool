@@ -106,6 +106,23 @@ export interface ReprocessResponse {
   message: string;
 }
 
+export interface ReviewReference {
+  id: number;
+  batch_id: number;
+  version: number;
+  original_filename: string;
+  file_hash: string;
+  file_size: number;
+  sheet_names: string[];
+  row_count: number;
+  created_at: string;
+  is_current: boolean;
+}
+
+export interface ReviewReferenceListResponse {
+  items: ReviewReference[];
+}
+
 export const batchStatusLabels: Record<BatchStatus, string> = {
   UPLOADED: '已上传',
   PROCESSING: '识别中',
@@ -158,4 +175,3 @@ export const reasonLabels: Record<string, string> = {
   PROCESS_INTERRUPTED: '服务重启导致处理任务中断，可重新处理',
   COORDINATOR_FAILED: '批次协调任务失败',
 };
-

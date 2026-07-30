@@ -2,6 +2,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--spacing-xl);
+  min-width: 0;
 }
 
 .pageHeader {
@@ -12,7 +13,7 @@
 .pageTitle {
   margin: 0 0 var(--spacing-sm) !important;
   font-family: var(--font-primary);
-  font-size: 32px !important;
+  font-size: clamp(26px, 2.25vw, 32px) !important;
 }
 
 .formRow {
@@ -20,6 +21,7 @@
   grid-template-columns: minmax(220px, 1fr) minmax(180px, 260px);
   gap: var(--spacing-base);
   margin-bottom: var(--spacing-base);
+  min-width: 0;
 }
 
 .uploadSummary {
@@ -36,9 +38,15 @@
 
 .metrics {
   display: grid;
-  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: var(--spacing-base);
   margin-top: var(--spacing-xl);
+}
+
+.batchActions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
 }
 
 .pathText {
@@ -51,6 +59,35 @@
 @media (max-width: 1000px) {
   .metrics {
     grid-template-columns: repeat(2, minmax(120px, 1fr));
+  }
+}
+
+@media (max-width: 1440px) {
+  .pageHeader {
+    padding-bottom: var(--spacing-base);
+  }
+
+  .metrics {
+    gap: var(--spacing-md);
+    margin-top: var(--spacing-base);
+  }
+
+  .pageContainer :global(.ant-card-head) {
+    padding-inline: var(--spacing-base);
+  }
+
+  .pageContainer :global(.ant-card-body) {
+    padding: var(--spacing-base);
+  }
+
+  .pageContainer :global(.ant-card-head-wrapper) {
+    align-items: flex-start;
+    gap: var(--spacing-md);
+    flex-wrap: wrap;
+  }
+
+  .pageContainer :global(.ant-card-extra) {
+    margin-inline-start: 0;
   }
 }
 
@@ -68,4 +105,3 @@
     grid-template-columns: 1fr;
   }
 }
-

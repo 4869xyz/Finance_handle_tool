@@ -5,7 +5,9 @@ import os
 from pathlib import Path
 from typing import Optional, List
 from pydantic import BaseModel
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -80,10 +82,65 @@ def _require_llm_config_token(
         raise HTTPException(status_code=401, detail="未授权")
 
 from app.config import get_settings, clear_settings_cache
+from app.database import get_db
+from app.models.company_profile import CompanyProfile
+from app.schemas.company_profile import (
+    CompanyIdentityResponse,
+    CompanyProfileResponse,
+    CompanyProfileUpdate,
+)
 from app.services.llm_service import get_llm_service, reset_llm_service, PROVIDERS
 from app.services.model_registry import get_models_with_fallback
 
 router = APIRouter()
+
+
+def _company_profile_response(profile: CompanyProfile) -> CompanyProfileResponse:
+    names = [profile.official_name, *(profile.aliases or [])]
+    tax_ids = profile.tax_ids or []
+    return CompanyProfileResponse(
+        version=profile.version,
+        identities=[
+            CompanyIdentityResponse(
+                company_name=name,
+                tax_id=tax_ids[index] if index < len(tax_ids) else "",
+            )
+            for index, name in enumerate(names)
+            if name
+        ],
+        updated_at=profile.updated_at,
+    )
+
+
+@router.get(
+    "/company-profile",
+    response_model=CompanyProfileResponse | None,
+)
+async def get_company_profile(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(CompanyProfile).order_by(CompanyProfile.version.desc()).limit(1)
+    )
+    profile = result.scalar_one_or_none()
+    return _company_profile_response(profile) if profile else None
+
+
+@router.put(
+    "/company-profile",
+    response_model=CompanyProfileResponse,
+)
+async def update_company_profile(
+    payload: CompanyProfileUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    profile = CompanyProfile(
+        official_name=payload.identities[0].company_name,
+        aliases=[identity.company_name for identity in payload.identities[1:]],
+        tax_ids=[identity.tax_id for identity in payload.identities],
+    )
+    db.add(profile)
+    await db.commit()
+    await db.refresh(profile)
+    return _company_profile_response(profile)
 
 
 class LLMProviderInfo(BaseModel):

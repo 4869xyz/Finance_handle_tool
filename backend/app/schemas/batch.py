@@ -113,3 +113,22 @@ class ReprocessResponse(BaseModel):
     batch_id: int
     scheduled_count: int
     message: str
+
+
+class ReviewReferenceResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    batch_id: int
+    version: int
+    original_filename: str
+    file_hash: str
+    file_size: int
+    sheet_names: list[str]
+    row_count: int
+    created_at: datetime
+    is_current: bool = False
+
+
+class ReviewReferenceListResponse(BaseModel):
+    items: list[ReviewReferenceResponse]

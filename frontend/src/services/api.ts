@@ -17,8 +17,11 @@ import type {
   BatchUploadItem,
   ProcessingBatch,
   ReprocessResponse,
+  ReviewReference,
+  ReviewReferenceListResponse,
   SourceDocumentListResponse,
 } from '../types/batch';
+import type { CompanyProfile, CompanyProfileUpdate } from '../types/settings';
 
 const api = axios.create({
   baseURL: '/api',
@@ -100,6 +103,49 @@ export const reprocessDocumentBatch = async (
     `/batches/${id}/reprocess`,
     documentIds ? { document_ids: documentIds } : {}
   );
+  return response.data;
+};
+
+export const exportFilteredDocumentBatch = async (id: number): Promise<Blob> => {
+  const response = await api.post(`/batches/${id}/export/filtered`, null, {
+    responseType: 'blob',
+  });
+  return response.data;
+};
+
+export const uploadBatchReviewReference = async (
+  id: number,
+  file: File
+): Promise<ReviewReference> => {
+  const formData = new FormData();
+  formData.append('file', file, file.name);
+  const response = await api.post(`/batches/${id}/review-references`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+  return response.data;
+};
+
+export const listBatchReviewReferences = async (
+  id: number
+): Promise<ReviewReferenceListResponse> => {
+  const response = await api.get(`/batches/${id}/review-references`);
+  return response.data;
+};
+
+export const getBatchReviewReferenceDownloadUrl = (
+  id: number,
+  version: number
+): string => `/api/batches/${id}/review-references/${version}/download`;
+
+export const getCompanyProfile = async (): Promise<CompanyProfile | null> => {
+  const response = await api.get('/settings/company-profile');
+  return response.data;
+};
+
+export const updateCompanyProfile = async (
+  payload: CompanyProfileUpdate
+): Promise<CompanyProfile> => {
+  const response = await api.put('/settings/company-profile', payload);
   return response.data;
 };
 

@@ -2,23 +2,27 @@
 .pageContainer {
   background-color: var(--surface);
   min-height: 100vh;
+  min-width: 0;
 }
 
 /* Header Section */
 .pageHeader {
-  height: 72px;
+  min-height: 72px;
   background-color: var(--background);
   border-bottom: 1px solid var(--border);
   padding: var(--spacing-base) var(--spacing-2xl);
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: var(--spacing-base);
+  flex-wrap: wrap;
 }
 
 .headerLeft {
   display: flex;
   align-items: center;
   gap: var(--spacing-base);
+  min-width: 0;
 }
 
 .backButton {
@@ -69,6 +73,8 @@
   display: flex;
   align-items: center;
   gap: var(--spacing-md);
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .rejectButton {
@@ -120,6 +126,7 @@
   padding: var(--spacing-xl) var(--spacing-2xl);
   display: flex;
   gap: var(--spacing-xl);
+  min-width: 0;
 }
 
 /* Left Panel */
@@ -128,6 +135,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--spacing-lg);
+  min-width: 0;
 }
 
 /* Card Styling */
@@ -281,8 +289,9 @@
 
 /* Right Panel - PDF Preview */
 .rightPanel {
-  width: 420px;
+  width: clamp(320px, 30vw, 420px);
   flex-shrink: 0;
+  min-width: 0;
 }
 
 .previewCard {
@@ -301,6 +310,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
 }
 
 .previewTitle {
@@ -374,6 +385,53 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-base);
   overflow: hidden;
+}
+
+.previewFrame {
+  display: block;
+  width: 100%;
+  height: min(600px, calc(100vh - 250px));
+  min-height: 360px;
+  border: none;
+}
+
+.previewImage {
+  display: block;
+  width: 100%;
+  max-height: min(600px, calc(100vh - 250px));
+  object-fit: contain;
+}
+
+@media (max-width: 1440px) {
+  .pageHeader {
+    padding: var(--spacing-md) var(--spacing-xl);
+  }
+
+  .contentBody {
+    padding: var(--spacing-lg) var(--spacing-xl);
+    gap: var(--spacing-base);
+  }
+
+  .cardHeader,
+  .cardBody,
+  .previewHeader,
+  .previewBody {
+    padding: var(--spacing-base);
+  }
+}
+
+@media (max-width: 1280px) {
+  .contentBody {
+    flex-direction: column;
+  }
+
+  .rightPanel {
+    width: 100%;
+  }
+
+  .previewCard {
+    max-height: none;
+  }
 }
 
 /* Buttons */

@@ -6,6 +6,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-base);
   background-color: var(--background);
+  min-width: 0;
 }
 
 .label {
@@ -17,8 +18,16 @@
 
 .value {
   font-family: var(--font-primary);
-  font-size: var(--spacing-2xl);
+  font-size: clamp(24px, 2vw, 32px);
   font-weight: var(--font-weight-semibold);
   color: var(--foreground);
   line-height: var(--line-height-tight);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1440px) {
+  .metricCard {
+    gap: var(--spacing-md);
+    padding: var(--spacing-base);
+  }
 }

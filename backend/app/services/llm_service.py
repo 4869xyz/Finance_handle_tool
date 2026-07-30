@@ -21,6 +21,24 @@ from app.services.prompts import (
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+DEFAULT_CHAT_MAX_OUTPUT_TOKENS = 1000
+QWEN_MAX_OUTPUT_TOKENS = 32768
+
+
+class LLMOutputTruncatedError(RuntimeError):
+    """Raised when a provider stops because the output token limit was reached."""
+
+
+class LLMConfigurationError(ValueError):
+    """Raised when a request option is invalid for the configured provider."""
+
+
+def _openai_compatible_text(response) -> str:
+    choice = response.choices[0]
+    if getattr(choice, "finish_reason", None) == "length":
+        raise LLMOutputTruncatedError("Model output reached the token limit")
+    return (choice.message.content or "").strip()
+
 #判断当前模型名是否支持视觉（精确匹配或带 - / . 的前缀匹配，避免误判）
 def _model_matches_vision_pattern(model_name: str, vision_patterns: list[str]) -> bool:
     """Check if a model name matches any vision pattern.
@@ -89,7 +107,14 @@ class BaseLLMProvider(ABC):
         pass
 
     @abstractmethod
-    def chat_completion(self, system_prompt: str, user_prompt: str) -> str:
+    def chat_completion(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        max_output_tokens: int | None = None,
+        json_mode: bool = False,
+    ) -> str:
         """Send chat completion request and return response content."""
         pass
 
@@ -147,8 +172,21 @@ class OpenAIProvider(BaseLLMProvider):
     def supports_vision(self) -> bool:
         return _model_matches_vision_pattern(settings.openai_model, self.VISION_MODELS)
 
-    def chat_completion(self, system_prompt: str, user_prompt: str) -> str:
+    def chat_completion(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        max_output_tokens: int | None = None,
+        json_mode: bool = False,
+    ) -> str:
         model = settings.openai_model
+        request_options = _get_max_tokens_param(
+            model,
+            max_output_tokens or DEFAULT_CHAT_MAX_OUTPUT_TOKENS,
+        )
+        if json_mode:
+            request_options["response_format"] = {"type": "json_object"}
         response = self.client.chat.completions.create(
             model=model,
             messages=[
@@ -156,9 +194,9 @@ class OpenAIProvider(BaseLLMProvider):
                 {"role": "user", "content": user_prompt}
             ],
             temperature=0.1,
-            **_get_max_tokens_param(model, 1000),
+            **request_options,
         )
-        return response.choices[0].message.content.strip()
+        return _openai_compatible_text(response)
 
     def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png") -> str:
         model = settings.openai_model
@@ -215,15 +253,24 @@ class AnthropicProvider(BaseLLMProvider):
     def supports_vision(self) -> bool:
         return _model_matches_vision_pattern(settings.anthropic_model, self.VISION_MODELS)
 
-    def chat_completion(self, system_prompt: str, user_prompt: str) -> str:
+    def chat_completion(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        max_output_tokens: int | None = None,
+        json_mode: bool = False,
+    ) -> str:
         response = self.client.messages.create(
             model=settings.anthropic_model,
-            max_tokens=1000,
+            max_tokens=max_output_tokens or DEFAULT_CHAT_MAX_OUTPUT_TOKENS,
             system=system_prompt,
             messages=[
                 {"role": "user", "content": user_prompt}
             ],
         )
+        if getattr(response, "stop_reason", None) == "max_tokens":
+            raise LLMOutputTruncatedError("Model output reached the token limit")
         return response.content[0].text.strip()
 
     def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png") -> str:
@@ -295,10 +342,23 @@ class GoogleProvider(BaseLLMProvider):
     def supports_vision(self) -> bool:
         return _model_matches_vision_pattern(settings.google_model, self.VISION_MODELS)
 
-    def chat_completion(self, system_prompt: str, user_prompt: str) -> str:
+    def chat_completion(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        max_output_tokens: int | None = None,
+        json_mode: bool = False,
+    ) -> str:
         # Gemini combines system and user prompts
         full_prompt = f"{system_prompt}\n\n{user_prompt}"
-        response = self.model.generate_content(full_prompt)
+        generation_config = None
+        if max_output_tokens is not None:
+            generation_config = {"max_output_tokens": max_output_tokens}
+        response = self.model.generate_content(
+            full_prompt,
+            generation_config=generation_config,
+        )
         return response.text.strip()
 
     def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png") -> str:
@@ -355,7 +415,22 @@ class QwenProvider(BaseLLMProvider):
     def supports_vision(self) -> bool:
         return _model_matches_vision_pattern(settings.qwen_model, self.VISION_MODELS)
 
-    def chat_completion(self, system_prompt: str, user_prompt: str) -> str:
+    def chat_completion(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        max_output_tokens: int | None = None,
+        json_mode: bool = False,
+    ) -> str:
+        output_tokens = max_output_tokens or DEFAULT_CHAT_MAX_OUTPUT_TOKENS
+        if output_tokens > QWEN_MAX_OUTPUT_TOKENS:
+            raise LLMConfigurationError(
+                f"Qwen max_output_tokens must not exceed {QWEN_MAX_OUTPUT_TOKENS}"
+            )
+        request_options = {"max_tokens": output_tokens}
+        if json_mode:
+            request_options["response_format"] = {"type": "json_object"}
         response = self.client.chat.completions.create(
             model=settings.qwen_model,
             messages=[
@@ -363,10 +438,9 @@ class QwenProvider(BaseLLMProvider):
                 {"role": "user", "content": user_prompt}
             ],
             temperature=0.1,
-            max_tokens=1000,
-            response_format={"type": "json_object"},
+            **request_options,
         )
-        return response.choices[0].message.content.strip()
+        return _openai_compatible_text(response)
 
     def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png") -> str:
         base64_image = base64.b64encode(image_data).decode("utf-8")
@@ -417,7 +491,19 @@ class DeepSeekProvider(BaseLLMProvider):
     def get_provider_name(self) -> str:
         return "deepseek"
 
-    def chat_completion(self, system_prompt: str, user_prompt: str) -> str:
+    def chat_completion(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        max_output_tokens: int | None = None,
+        json_mode: bool = False,
+    ) -> str:
+        request_options = {
+            "max_tokens": max_output_tokens or DEFAULT_CHAT_MAX_OUTPUT_TOKENS
+        }
+        if json_mode:
+            request_options["response_format"] = {"type": "json_object"}
         response = self.client.chat.completions.create(
             model=settings.deepseek_model,
             messages=[
@@ -425,9 +511,9 @@ class DeepSeekProvider(BaseLLMProvider):
                 {"role": "user", "content": user_prompt}
             ],
             temperature=0.1,
-            max_tokens=1000,
+            **request_options,
         )
-        return response.choices[0].message.content.strip()
+        return _openai_compatible_text(response)
 
 
 class ZhipuProvider(BaseLLMProvider):
@@ -461,7 +547,14 @@ class ZhipuProvider(BaseLLMProvider):
     def supports_vision(self) -> bool:
         return _model_matches_vision_pattern(settings.zhipu_model, self.VISION_MODELS)
 
-    def chat_completion(self, system_prompt: str, user_prompt: str) -> str:
+    def chat_completion(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        max_output_tokens: int | None = None,
+        json_mode: bool = False,
+    ) -> str:
         response = self.client.chat.completions.create(
             model=settings.zhipu_model,
             messages=[
@@ -469,9 +562,9 @@ class ZhipuProvider(BaseLLMProvider):
                 {"role": "user", "content": user_prompt}
             ],
             temperature=0.1,
-            max_tokens=1000,
+            max_tokens=max_output_tokens or DEFAULT_CHAT_MAX_OUTPUT_TOKENS,
         )
-        return response.choices[0].message.content.strip()
+        return _openai_compatible_text(response)
 
     def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png") -> str:
         base64_image = base64.b64encode(image_data).decode("utf-8")

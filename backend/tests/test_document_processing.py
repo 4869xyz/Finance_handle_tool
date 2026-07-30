@@ -116,7 +116,7 @@ class FakeProvider:
         self.response = response
         self.calls = 0
 
-    def chat_completion(self, _system, _prompt):
+    def chat_completion(self, _system, _prompt, **_kwargs):
         self.calls += 1
         return self.response
 
@@ -254,7 +254,7 @@ def test_invalid_extraction_json_falls_back_to_rules(monkeypatch):
 
 def test_llm_api_exception_detail_is_preserved_for_classification(monkeypatch):
     class BoomProvider:
-        def chat_completion(self, _system, _prompt):
+        def chat_completion(self, _system, _prompt, **_kwargs):
             raise RuntimeError("model_not_found qwen3.5-vl")
 
     monkeypatch.setattr(

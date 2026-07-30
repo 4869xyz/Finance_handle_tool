@@ -1,3 +1,8 @@
+from datetime import date, datetime
+from decimal import Decimal
+from io import BytesIO
+
+from openpyxl import Workbook, load_workbook
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from httpx import AsyncClient
@@ -6,9 +11,17 @@ from app.database import Base, get_db
 from app.main import app
 from app.models.batch import (
     BatchStatus,
+    DocumentType,
     ProcessingBatch,
     ProcessingStatus,
     SourceDocument,
+    SourceFolder,
+)
+from app.models.company_profile import CompanyProfile
+from app.services.exclusion_service import FilterDecision, FilterOutcome
+from app.services.expense_classification_service import (
+    ExpenseClassification,
+    ExpenseClassificationStatus,
 )
 
 
@@ -100,6 +113,425 @@ async def test_batch_api_create_query_and_atomic_mismatch(monkeypatch):
                 await db.scalar(select(func.count()).select_from(ProcessingBatch))
                 == 1
             )
+    finally:
+        app.dependency_overrides.clear()
+        await engine.dispose()
+
+
+async def test_batch_excel_export_includes_all_documents_and_typed_values():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def override_db():
+        async with maker() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        async with maker() as db:
+            batch = ProcessingBatch(
+                employee_name='张三:/测试',
+                expense_month=date(2025, 7, 1),
+                status=BatchStatus.COMPLETED,
+                total_files=2,
+                recognized_files=1,
+                skipped_files=1,
+            )
+            db.add(batch)
+            await db.flush()
+            db.add_all([
+                SourceDocument(
+                    batch_id=batch.id,
+                    source_folder=SourceFolder.PAYMENT_EVIDENCE,
+                    relative_path='支付凭证/行程.pdf',
+                    file_name='行程.pdf',
+                    file_type='pdf',
+                    file_size=1024,
+                    file_hash='a' * 64,
+                    document_type=DocumentType.ITINERARY,
+                    processing_status=ProcessingStatus.RECOGNIZED,
+                    document_date=date(2025, 7, 5),
+                    counterparty='高德地图',
+                    description='网约车行程',
+                    amount=Decimal('19.50'),
+                    currency='CNY',
+                    transaction_number='ORDER-001',
+                    classification_confidence=Decimal('0.9500'),
+                    extraction_confidence=Decimal('0.9100'),
+                    processing_attempts=1,
+                    updated_at=datetime(2025, 7, 6, 12, 30, 0),
+                ),
+                SourceDocument(
+                    batch_id=batch.id,
+                    source_folder=SourceFolder.PAYMENT_EVIDENCE,
+                    relative_path='支付凭证/PDF合并.pdf',
+                    file_name='PDF合并.pdf',
+                    file_type='pdf',
+                    file_size=2048,
+                    file_hash='b' * 64,
+                    document_type=DocumentType.UNKNOWN,
+                    processing_status=ProcessingStatus.SKIPPED,
+                    status_reason='DUPLICATE_SUMMARY_PDF',
+                    status_detail='重复汇总文件',
+                    processing_attempts=0,
+                    updated_at=datetime(2025, 7, 6, 12, 31, 0),
+                ),
+            ])
+            await db.commit()
+
+        async with AsyncClient(app=app, base_url="http://test") as client:
+            page = await client.get('/api/batches/1/documents?page=1&page_size=1')
+            assert len(page.json()['items']) == 1
+
+            response = await client.get('/api/batches/1/export/excel')
+            assert response.status_code == 200
+            assert response.headers['content-type'].startswith(
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+            disposition = response.headers['content-disposition']
+            assert 'filename*=UTF-8' in disposition
+            assert '%E8%AF%86%E5%88%AB%E7%BB%93%E6%9E%9C.xlsx' in disposition
+
+            workbook = load_workbook(BytesIO(response.content), data_only=True)
+            worksheet = workbook['识别结果']
+            assert worksheet.max_row == 3
+            assert worksheet.max_column == 22
+            assert worksheet.freeze_panes == 'A2'
+            assert worksheet.auto_filter.ref == 'A1:V3'
+            assert [cell.value for cell in worksheet[1]][:5] == [
+                '序号', '员工姓名', '报销月份', '批次号', '来源'
+            ]
+            assert worksheet['I2'].value == '已识别'
+            assert worksheet['L2'].value == datetime(2025, 7, 5)
+            assert worksheet['O2'].value == 19.5
+            assert worksheet['O2'].number_format == '#,##0.00'
+            assert worksheet['S2'].value == 0.95
+            assert worksheet['S2'].number_format == '0.0%'
+            assert worksheet['T2'].value == 0.91
+            assert worksheet['I3'].value == '已跳过'
+            assert worksheet['J3'].value == '重复汇总PDF，已跳过'
+
+            missing = await client.get('/api/batches/999/export/excel')
+            assert missing.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+        await engine.dispose()
+
+
+async def test_filtered_batch_export_has_auditable_six_sheet_reconciliation(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def override_db():
+        async with maker() as session:
+            yield session
+
+    def fake_filter(documents, profile, reference=None):
+        outcomes = [
+            (FilterOutcome.KEEP, "BUSINESS_EXPENSE"),
+            (FilterOutcome.KEEP, "BUSINESS_EXPENSE"),
+            (FilterOutcome.EXCLUDE, "DUPLICATE_SUMMARY_PDF"),
+            (FilterOutcome.REVIEW, "SOURCE_NOT_RECOGNIZED"),
+        ]
+        return [
+            FilterDecision(
+                document_id=document.id,
+                outcome=outcome,
+                reason_code=code,
+                reason="测试原因",
+                evidence="测试证据",
+                buyer_name="示例科技有限公司" if index == 0 else None,
+                buyer_tax_id=None,
+                confidence=0.95 if outcome == FilterOutcome.KEEP else None,
+                company_profile_version=profile.version if profile else None,
+            )
+            for index, (document, (outcome, code)) in enumerate(zip(documents, outcomes))
+        ]
+
+    def fake_classify(documents, reference=None):
+        values = [
+            ("办公费", "打印纸", "打印纸采购", ExpenseClassificationStatus.CLASSIFIED),
+            ("办公费", "打印纸", "打印纸采购", ExpenseClassificationStatus.CLASSIFIED),
+            ("待分类", "", "PDF合并", ExpenseClassificationStatus.UNCLASSIFIED),
+            ("待分类", "", "订单凭证", ExpenseClassificationStatus.UNCLASSIFIED),
+        ]
+        return {
+            document.id: ExpenseClassification(
+                document_id=document.id,
+                expense_type=expense_type,
+                standard_subcategory=subcategory,
+                expense_item=item,
+                hospitality_target="",
+                status=status,
+                confidence=0.95 if status == ExpenseClassificationStatus.CLASSIFIED else None,
+                evidence="测试分类依据",
+                evidence_source="RULE",
+                error_code=(
+                    None
+                    if status == ExpenseClassificationStatus.CLASSIFIED
+                    else "SOURCE_NOT_RECOGNIZED"
+                ),
+            )
+            for document, (expense_type, subcategory, item, status)
+            in zip(documents, values)
+        }
+
+    monkeypatch.setattr("app.routers.batches.filter_documents", fake_filter)
+    monkeypatch.setattr("app.routers.batches.classify_expenses", fake_classify)
+    app.dependency_overrides[get_db] = override_db
+    try:
+        async with maker() as db:
+            batch = ProcessingBatch(
+                employee_name="张三",
+                expense_month=date(2025, 7, 1),
+                status=BatchStatus.COMPLETED,
+                total_files=4,
+                recognized_files=2,
+                manual_review_files=1,
+                skipped_files=1,
+            )
+            db.add(batch)
+            db.add(CompanyProfile(
+                official_name="示例科技有限公司",
+                aliases=[],
+                tax_ids=["913000000000000001"],
+            ))
+            await db.flush()
+            db.add_all([
+                SourceDocument(
+                    batch_id=batch.id,
+                    source_folder=SourceFolder.INVOICE,
+                    relative_path="发票/a.pdf",
+                    file_name="a.pdf",
+                    file_type="pdf",
+                    file_size=1,
+                    file_hash="a" * 64,
+                    document_type=DocumentType.ELECTRONIC_INVOICE,
+                    processing_status=ProcessingStatus.RECOGNIZED,
+                    amount=Decimal("20.00"),
+                    currency="CNY",
+                    processing_attempts=1,
+                ),
+                SourceDocument(
+                    batch_id=batch.id,
+                    source_folder=SourceFolder.PAYMENT_EVIDENCE,
+                    relative_path="支付凭证/b.jpg",
+                    file_name="b.jpg",
+                    file_type="jpg",
+                    file_size=1,
+                    file_hash="b" * 64,
+                    document_type=DocumentType.PAYMENT_SCREENSHOT,
+                    processing_status=ProcessingStatus.RECOGNIZED,
+                    amount=Decimal("30.00"),
+                    currency="CNY",
+                    processing_attempts=1,
+                ),
+                SourceDocument(
+                    batch_id=batch.id,
+                    source_folder=SourceFolder.REPLACEMENT_INVOICE,
+                    relative_path="补票/PDF合并.pdf",
+                    file_name="PDF合并.pdf",
+                    file_type="pdf",
+                    file_size=1,
+                    file_hash="c" * 64,
+                    document_type=DocumentType.UNKNOWN,
+                    processing_status=ProcessingStatus.SKIPPED,
+                    status_reason="DUPLICATE_SUMMARY_PDF",
+                    processing_attempts=0,
+                ),
+                SourceDocument(
+                    batch_id=batch.id,
+                    source_folder=SourceFolder.PAYMENT_EVIDENCE,
+                    relative_path="支付凭证/d.jpg",
+                    file_name="d.jpg",
+                    file_type="jpg",
+                    file_size=1,
+                    file_hash="d" * 64,
+                    document_type=DocumentType.ORDER_SCREENSHOT,
+                    processing_status=ProcessingStatus.NEEDS_MANUAL_REVIEW,
+                    processing_attempts=1,
+                ),
+            ])
+            await db.commit()
+
+        async with AsyncClient(app=app, base_url="http://test") as client:
+            response = await client.post("/api/batches/1/export/filtered")
+            assert response.status_code == 200
+            assert "%E5%89%94%E9%99%A4%E7%BB%93%E6%9E%9C.xlsx" in response.headers[
+                "content-disposition"
+            ]
+
+            workbook = load_workbook(BytesIO(response.content), data_only=True)
+            assert workbook.sheetnames == [
+                "识别结果",
+                "发票补票_剔除后",
+                "支付凭证_剔除后",
+                "排除与待复核",
+                "发票补票_分类汇总",
+                "支付凭证_分类汇总",
+            ]
+            original = workbook["识别结果"]
+            invoice = workbook["发票补票_剔除后"]
+            payment = workbook["支付凭证_剔除后"]
+            exception = workbook["排除与待复核"]
+            invoice_classification = workbook["发票补票_分类汇总"]
+            payment_classification = workbook["支付凭证_分类汇总"]
+            assert original.max_row == 5
+            assert original.max_column == 22
+            assert invoice.max_row == 3
+            assert payment.max_row == 3
+            assert exception.max_row == 3
+            assert invoice.max_column == payment.max_column == exception.max_column == 33
+            assert invoice["W1"].value == "筛选结论"
+            assert invoice["AF1"].value == "辅助表版本"
+            assert invoice["AG1"].value == "辅助匹配依据"
+            assert invoice["W2"].value == "保留"
+            assert invoice["A2"].font.color.type != "rgb"
+            assert original["A4"].font.color.type != "rgb"
+            assert invoice["F3"].value == "PDF合并.pdf"
+            assert invoice["W3"].value == "排除"
+            assert all(
+                cell.font.color.type == "rgb"
+                and cell.font.color.rgb.endswith("C00000")
+                for cell in invoice[3]
+            )
+            assert payment["F3"].value == "d.jpg"
+            assert payment["W3"].value == "待复核"
+            assert all(
+                cell.font.color.type == "rgb"
+                and cell.font.color.rgb.endswith("C00000")
+                for cell in payment[3]
+            )
+            assert exception["W2"].value == "排除"
+            assert exception["W3"].value == "待复核"
+            assert exception["A2"].fill.fgColor.rgb.endswith("FCE8E6")
+            assert exception["A3"].fill.fgColor.rgb.endswith("FFF4CC")
+            assert original.max_row - 1 == (
+                invoice.max_row - 1 + payment.max_row - 1
+            )
+            assert exception.max_row - 1 == 2
+            assert invoice_classification.max_column == 31
+            assert payment_classification.max_column == 31
+            assert invoice_classification["F1"].value == "费用类型"
+            assert invoice_classification["Z1"].value == "发票补票金额"
+            assert invoice_classification["AB1"].value == "支付凭证金额"
+            assert invoice_classification["AD1"].value == "核对状态"
+            assert sum(
+                cell.value == "明细" for cell in invoice_classification["A"]
+            ) == 2
+            assert sum(
+                cell.value == "明细" for cell in payment_classification["A"]
+            ) == 2
+            invoice_duplicate_row = next(
+                row
+                for row in invoice_classification.iter_rows(min_row=2)
+                if row[15].value == "PDF合并.pdf"
+            )
+            payment_review_row = next(
+                row
+                for row in payment_classification.iter_rows(min_row=2)
+                if row[15].value == "d.jpg"
+            )
+            assert all(
+                cell.font.color.type == "rgb"
+                and cell.font.color.rgb.endswith("C00000")
+                for cell in invoice_duplicate_row
+            )
+            assert all(
+                cell.font.color.type == "rgb"
+                and cell.font.color.rgb.endswith("C00000")
+                for cell in payment_review_row
+            )
+            office_subtotal = next(
+                row
+                for row in invoice_classification.iter_rows(min_row=2)
+                if row[0].value == "小计" and row[5].value == "办公费"
+            )
+            assert office_subtotal[24].value == 1
+            assert office_subtotal[25].value == 20
+            assert office_subtotal[26].value == 1
+            assert office_subtotal[27].value == 30
+            assert office_subtotal[28].value == -10
+            assert office_subtotal[29].value == "金额不一致"
+            assert office_subtotal[0].fill.fgColor.rgb.endswith("FCE8E6")
+            for worksheet in workbook.worksheets:
+                assert worksheet.freeze_panes == "A2"
+                assert worksheet.auto_filter.ref is not None
+    finally:
+        app.dependency_overrides.clear()
+        await engine.dispose()
+
+
+async def test_review_reference_upload_versions_list_and_download():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def override_db():
+        async with maker() as session:
+            yield session
+
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "报销明细"
+    worksheet.append(["发票号", "用途", "金额"])
+    worksheet.append(["INV-2025-001", "办公用品", Decimal("88.50")])
+    stream = BytesIO()
+    workbook.save(stream)
+    content = stream.getvalue()
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        async with maker() as db:
+            db.add(ProcessingBatch(
+                employee_name="张三",
+                expense_month=date(2025, 7, 1),
+                status=BatchStatus.COMPLETED,
+                total_files=0,
+            ))
+            await db.commit()
+
+        async with AsyncClient(app=app, base_url="http://test") as client:
+            first = await client.post(
+                "/api/batches/1/review-references",
+                files={"file": ("明细.xlsx", content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+            )
+            assert first.status_code == 201
+            assert first.json()["version"] == 1
+            assert first.json()["row_count"] == 2
+
+            second = await client.post(
+                "/api/batches/1/review-references",
+                files={"file": ("明细修订.xlsx", content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+            )
+            assert second.status_code == 201
+            assert second.json()["version"] == 2
+
+            listing = await client.get("/api/batches/1/review-references")
+            assert listing.status_code == 200
+            items = listing.json()["items"]
+            assert [item["version"] for item in items] == [2, 1]
+            assert items[0]["is_current"] is True
+            assert items[1]["is_current"] is False
+
+            download = await client.get(
+                "/api/batches/1/review-references/1/download"
+            )
+            assert download.status_code == 200
+            assert download.content == content
+
+            invalid = await client.post(
+                "/api/batches/1/review-references",
+                files={"file": ("错误.xls", b"not-xlsx", "application/vnd.ms-excel")},
+            )
+            assert invalid.status_code == 400
+            after_invalid = await client.get("/api/batches/1/review-references")
+            assert len(after_invalid.json()["items"]) == 2
     finally:
         app.dependency_overrides.clear()
         await engine.dispose()

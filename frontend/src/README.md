@@ -21,4 +21,4 @@
 
 页面事件 → `services/api.ts` → Vite 代理 `/api` → backend → 回写 UI 状态
 
-`BatchPage` 将每个 `File` 与原始 `webkitRelativePath` 在同一循环中配对提交；活动批次每 2 秒轮询，终态或卸载后停止。
+`BatchPage` 将每个 `File` 与原始 `webkitRelativePath` 在同一循环中配对提交；活动批次每 2 秒轮询，终态或卸载后停止。批次达到 `COMPLETED` 或 `FAILED` 后，可通过 `/api/batches/{id}/export/excel` 下载不受当前分页影响的全量识别结果。

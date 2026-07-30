@@ -217,7 +217,7 @@ LLM 密钥/模型：backend/.env + /api/settings
 | 文件 | 作用 |
 |------|------|
 | `routers/invoices.py` | 上传、列表、详情、文件、导出、差异确认 |
-| `routers/batches.py` | 月度批次创建、列表、详情、文档分页和重处理 |
+| `routers/batches.py` | 月度批次创建、列表、详情、文档分页、全量 Excel 导出和重处理 |
 | `routers/settings.py` | LLM 配置与连通测试 |
 | `routers/health.py` | 健康检查 |
 | `services/invoice_service.py` | 处理编排、字段合并、待审核判定 |
@@ -239,7 +239,7 @@ LLM 密钥/模型：backend/.env + /api/settings
 | `src/pages/UploadPage.tsx` | 上传页 |
 | `src/pages/InvoiceListPage.tsx` | 列表 + 统计 + 筛选导出 |
 | `src/pages/InvoiceDetailPage.tsx` | 详情 + OCR/LLM 差异对比 |
-| `src/pages/BatchPage.tsx` | 目录上传、批次统计、轮询和文档分页明细 |
+| `src/pages/BatchPage.tsx` | 目录上传、批次统计、轮询、文档分页明细和终态批次 Excel 导出 |
 | `src/services/api.ts` | 封装 REST 调用 |
 | `src/types/invoice.ts` | 前端类型定义 |
 | `src/types/batch.ts` | 批次/文档类型与中文状态、原因映射 |

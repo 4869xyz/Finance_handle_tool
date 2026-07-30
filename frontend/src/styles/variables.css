@@ -94,3 +94,23 @@
   --z-modal: 500;
   --z-tooltip: 600;
 }
+
+@media (max-width: 1440px) {
+  :root {
+    --sidebar-width: 208px;
+    --sidebar-padding-x: 24px;
+    --sidebar-padding-y: 28px;
+    --content-padding-x: 28px;
+    --content-padding-y: 28px;
+  }
+}
+
+@media (max-width: 1280px) {
+  :root {
+    --sidebar-width: 192px;
+    --sidebar-padding-x: 20px;
+    --sidebar-padding-y: 24px;
+    --content-padding-x: 24px;
+    --content-padding-y: 24px;
+  }
+}

@@ -1,17 +1,19 @@
 /* Upload Page Styles - matching .pen design specifications */
 
 .pageContainer {
-  padding: 48px 64px;
+  padding: clamp(16px, 2vw, 32px);
   background: var(--surface);
-  min-height: 100vh;
+  min-height: 100%;
+  min-width: 0;
 }
 
 .contentWrapper {
-  max-width: 800px;
+  width: 100%;
+  max-width: 760px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: var(--spacing-2xl);
+  gap: var(--spacing-xl);
 }
 
 .pageHeader {
@@ -55,7 +57,7 @@
   align-items: center;
   justify-content: center;
   gap: var(--spacing-base);
-  padding: var(--spacing-4xl) var(--spacing-xl);
+  padding: clamp(28px, 4vh, 40px) var(--spacing-lg);
 }
 
 /* Upload Icon */
@@ -64,8 +66,8 @@
 }
 
 .uploadIcon {
-  width: 64px;
-  height: 64px;
+  width: 52px;
+  height: 52px;
   border-radius: 50%;
   background: #F3F4F6;
   display: flex;
@@ -75,7 +77,7 @@
 }
 
 .uploadIcon :global(.anticon) {
-  font-size: 28px;
+  font-size: 24px;
   color: var(--foreground);
 }
 
@@ -99,6 +101,18 @@
 .actionButtons {
   display: flex;
   gap: var(--spacing-md);
+  flex-wrap: wrap;
+}
+
+@media (max-width: 1440px) {
+  .pageHeader {
+    margin-bottom: var(--spacing-base);
+  }
+
+  .uploadCard,
+  .resultsCard {
+    padding: var(--spacing-lg);
+  }
 }
 
 .uploadButton {

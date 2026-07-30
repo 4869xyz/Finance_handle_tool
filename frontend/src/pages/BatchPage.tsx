@@ -16,7 +16,13 @@ import {
   Typography,
   Upload,
 } from 'antd';
-import { FolderOpenOutlined, ReloadOutlined, UploadOutlined } from '@ant-design/icons';
+import {
+  DownloadOutlined,
+  FilterOutlined,
+  FolderOpenOutlined,
+  ReloadOutlined,
+  UploadOutlined,
+} from '@ant-design/icons';
 import axios from 'axios';
 import dayjs, { Dayjs } from 'dayjs';
 import type { UploadFile } from 'antd/es/upload/interface';
@@ -24,15 +30,21 @@ import type { ColumnsType, TablePaginationConfig } from 'antd/es/table';
 
 import {
   createDocumentBatch,
+  exportFilteredDocumentBatch,
+  getCompanyProfile,
+  getBatchReviewReferenceDownloadUrl,
   getDocumentBatch,
   listBatchDocuments,
   listDocumentBatches,
+  listBatchReviewReferences,
   reprocessDocumentBatch,
+  uploadBatchReviewReference,
 } from '../services/api';
 import type {
   BatchDetail,
   BatchUploadItem,
   ProcessingBatch,
+  ReviewReference,
   SourceDocument,
 } from '../types/batch';
 import {
@@ -48,6 +60,7 @@ import styles from './BatchPage.module.css';
 const MAX_FILE_SIZE = 150 * 1024 * 1024;
 const MAX_TOTAL_SIZE = 256 * 1024 * 1024;
 const MAX_FILES = 200;
+const MAX_REFERENCE_FILE_SIZE = 10 * 1024 * 1024;
 const ACCEPTED_EXTENSIONS = new Set([
   'pdf', 'jpg', 'jpeg', 'png', 'mp4', 'mov', 'avi', 'mkv',
 ]);
@@ -96,6 +109,14 @@ function statusColor(status: string): string {
 }
 
 
+function safeFilteredFilename(batch: BatchDetail): string {
+  const employee = batch.employee_name
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+    .replace(/^[ .]+|[ .]+$/g, '') || '员工';
+  return `${employee}_${batch.expense_month}_剔除结果.xlsx`;
+}
+
+
 export default function BatchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedId = Number(searchParams.get('batch') || 0) || null;
@@ -111,6 +132,9 @@ export default function BatchPage() {
   const [documentPageSize, setDocumentPageSize] = useState(20);
   const [loadingBatch, setLoadingBatch] = useState(false);
   const [reprocessing, setReprocessing] = useState(false);
+  const [exportingFiltered, setExportingFiltered] = useState(false);
+  const [uploadingReference, setUploadingReference] = useState(false);
+  const [reviewReferences, setReviewReferences] = useState<ReviewReference[]>([]);
 
   const selectedFiles = useMemo(
     () => fileList.flatMap((item) => (
@@ -133,13 +157,15 @@ export default function BatchPage() {
     page = documentPage,
     pageSize = documentPageSize
   ) => {
-    const [batchResponse, documentResponse] = await Promise.all([
+    const [batchResponse, documentResponse, referenceResponse] = await Promise.all([
       getDocumentBatch(id),
       listBatchDocuments(id, page, pageSize),
+      listBatchReviewReferences(id),
     ]);
     setBatch(batchResponse);
     setDocuments(documentResponse.items);
     setDocumentsTotal(documentResponse.total);
+    setReviewReferences(referenceResponse.items);
   }, [documentPage, documentPageSize]);
 
   useEffect(() => {
@@ -151,6 +177,7 @@ export default function BatchPage() {
       setBatch(null);
       setDocuments([]);
       setDocumentsTotal(0);
+      setReviewReferences([]);
       return;
     }
     setLoadingBatch(true);
@@ -219,6 +246,59 @@ export default function BatchPage() {
       message.error(errorMessage(error));
     } finally {
       setReprocessing(false);
+    }
+  };
+
+  const handleExport = () => {
+    if (!selectedId || !batch || !TERMINAL_BATCH_STATUSES.has(batch.status)) return;
+    window.open(`/api/batches/${selectedId}/export/excel`, '_blank', 'noopener,noreferrer');
+  };
+
+  const handleFilteredExport = async () => {
+    if (!selectedId || !batch || !TERMINAL_BATCH_STATUSES.has(batch.status)) return;
+    setExportingFiltered(true);
+    try {
+      const profile = await getCompanyProfile();
+      if (!profile) {
+        message.warning('尚未配置公司档案；发票将按放宽规则保留，并记录抬头无法核验提示');
+      }
+      const blob = await exportFilteredDocumentBatch(selectedId);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = safeFilteredFilename(batch);
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      message.success('审核及分类汇总表格已生成；红字和金额差额请人工复核');
+    } catch (error) {
+      message.error(errorMessage(error));
+    } finally {
+      setExportingFiltered(false);
+    }
+  };
+
+  const handleReferenceUpload = async (file: File) => {
+    if (!selectedId) return;
+    if (!file.name.toLowerCase().endsWith('.xlsx')) {
+      message.error('报销明细参考表仅支持 .xlsx 文件');
+      return;
+    }
+    if (file.size > MAX_REFERENCE_FILE_SIZE) {
+      message.error('报销明细参考表不能超过 10 MB');
+      return;
+    }
+    setUploadingReference(true);
+    try {
+      const uploaded = await uploadBatchReviewReference(selectedId, file);
+      message.success(`参考表 v${uploaded.version} 上传成功，解析 ${uploaded.row_count} 行`);
+      const response = await listBatchReviewReferences(selectedId);
+      setReviewReferences(response.items);
+    } catch (error) {
+      message.error(errorMessage(error));
+    } finally {
+      setUploadingReference(false);
     }
   };
 
@@ -424,8 +504,34 @@ export default function BatchPage() {
             loading={loadingBatch}
             title={`${batch.employee_name} · ${batch.expense_month} · 批次 #${batch.id}`}
             extra={(
-              <Space>
+              <Space wrap className={styles.batchActions}>
                 <Tag color={statusColor(batch.status)}>{batchStatusLabels[batch.status]}</Tag>
+                <Button
+                  icon={<DownloadOutlined />}
+                  disabled={!TERMINAL_BATCH_STATUSES.has(batch.status)}
+                  title={
+                    TERMINAL_BATCH_STATUSES.has(batch.status)
+                      ? '导出当前批次全部文档'
+                      : '请等待当前批次处理结束后再导出'
+                  }
+                  onClick={handleExport}
+                >
+                  导出 Excel
+                </Button>
+                <Button
+                  type="primary"
+                  icon={<FilterOutlined />}
+                  loading={exportingFiltered}
+                  disabled={!TERMINAL_BATCH_STATUSES.has(batch.status)}
+                  title={
+                    TERMINAL_BATCH_STATUSES.has(batch.status)
+                      ? '保留全部资料并生成发票、支付凭证分类汇总；红字和金额差额供人工审核'
+                      : '请等待当前批次处理结束后再生成'
+                  }
+                  onClick={handleFilteredExport}
+                >
+                  生成审核及分类汇总表格
+                </Button>
                 <Button
                   icon={<ReloadOutlined />}
                   loading={reprocessing}
@@ -444,6 +550,63 @@ export default function BatchPage() {
               <Statistic title="已跳过" value={batch.skipped_files} />
               <Statistic title="失败" value={batch.failed_files} />
             </div>
+          </Card>
+
+          <Card
+            title="报销明细参考表"
+            extra={(
+              <Upload
+                accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                showUploadList={false}
+                beforeUpload={(file) => {
+                  void handleReferenceUpload(file);
+                  return false;
+                }}
+              >
+                <Button icon={<UploadOutlined />} loading={uploadingReference}>
+                  上传参考表
+                </Button>
+              </Upload>
+            )}
+          >
+            {reviewReferences.length ? (
+              <List
+                size="small"
+                dataSource={reviewReferences}
+                renderItem={(reference) => (
+                  <List.Item
+                    actions={[
+                      <Button
+                        key="download"
+                        type="link"
+                        icon={<DownloadOutlined />}
+                        onClick={() => window.open(
+                          getBatchReviewReferenceDownloadUrl(batch.id, reference.version),
+                          '_blank',
+                          'noopener,noreferrer'
+                        )}
+                      >
+                        下载
+                      </Button>,
+                    ]}
+                  >
+                    <List.Item.Meta
+                      title={(
+                        <Space wrap>
+                          <Text>{reference.original_filename}</Text>
+                          <Tag color={reference.is_current ? 'green' : 'default'}>
+                            v{reference.version}{reference.is_current ? ' · 当前生效' : ''}
+                          </Tag>
+                        </Space>
+                      )}
+                      description={`${reference.row_count} 个有效行 · ${reference.sheet_names.length} 个工作表 · ${dayjs(reference.created_at).format('YYYY-MM-DD HH:mm')}`}
+                    />
+                  </List.Item>
+                )}
+              />
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未上传；不影响生成审核及分类汇总表格" />
+            )}
           </Card>
 
           <Card title="文档明细">

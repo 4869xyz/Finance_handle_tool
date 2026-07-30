@@ -9,6 +9,8 @@
 .mainContent {
   flex: 1;
   margin-left: var(--sidebar-width);
+  min-width: 0;
+  width: calc(100% - var(--sidebar-width));
   min-height: 100vh;
   display: flex;
   flex-direction: column;
@@ -17,6 +19,7 @@
 /* Content Wrapper */
 .contentWrapper {
   flex: 1;
+  min-width: 0;
   padding: var(--content-padding-y) var(--content-padding-x);
 }
 

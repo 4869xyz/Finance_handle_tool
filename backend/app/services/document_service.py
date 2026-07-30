@@ -564,7 +564,11 @@ def _call_model(
             image_data,
             mime_type,
         )
-    return provider.chat_completion(DOCUMENT_JSON_SYSTEM_PROMPT, prompt)
+    return provider.chat_completion(
+        DOCUMENT_JSON_SYSTEM_PROMPT,
+        prompt,
+        json_mode=True,
+    )
 
 
 def _mime_type(file_type: str) -> str:

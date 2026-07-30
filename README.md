@@ -257,6 +257,7 @@ docker compose ps
 | 🧭 多类型识别 | 发票、行程、票据、支付、订单、境外收据和其他报销资料 |
 | 👀 人工复核队列 | 缺关键字段、低置信度、多笔无汇总、视频和超像素图片均给出原因；第一阶段只查询/重试，不提供批次字段编辑或确认 API |
 | 🔁 恢复与重试 | 服务中断可审计，人工复核/失败文档可选择性重新处理 |
+| 📥 批次导出 | 处理完成后可导出该批次全部来源文档的 Excel 识别结果（包括已识别、人工复核、跳过和失败记录） |
 
 ### 提取字段 | Extracted Fields
 
@@ -282,6 +283,8 @@ docker compose ps
 ```
 
 月度资料公开字段按类型统一为：`document_date`、`counterparty`、`description`、`amount`、`currency`、`invoice_number`、`transaction_number`；完整候选字段和多笔交易保存在 `extracted_fields_json`。金额在 API 中以十进制字符串返回。
+
+其中 `description` 是批次资料的“摘要”字段：模型可用时，模型仅根据 OCR/PDF 正文生成交易或资料摘要；模型不可用或字段提取失败时，系统以 OCR 文本的第一条非空行作为降级摘要（最多 500 字符）。文件名和目录名不参与摘要生成。摘要为空不会单独阻止发票类资料进入已识别状态。
 
 ### 状态流转 | Status Workflow
 
@@ -326,6 +329,12 @@ GET /api/invoices?status=REVIEWING&owner=张三&page=1&page_size=20
 # 获取详情 | Get Detail (includes OCR, LLM, Diff results)
 GET /api/invoices/{id}
 
+# 原始文件、删除、确认和差异确认
+GET    /api/invoices/{id}/file
+DELETE /api/invoices/{id}
+POST   /api/invoices/{id}/confirm
+POST   /api/invoices/{id}/diffs/{diff_id}/resolve
+
 # 更新信息 | Update Invoice
 PUT /api/invoices/{id}
 {
@@ -345,16 +354,23 @@ POST /api/invoices/batch-reprocess
 # 统计数据 | Statistics
 GET /api/invoices/statistics
 
+# 单发票导出
+GET /api/invoices/export/csv
+GET /api/invoices/export/excel
+
 # LLM配置 | LLM Configuration
 GET  /api/settings/llm/status
 POST /api/settings/llm/configure
 POST /api/settings/llm/test
+POST /api/settings/llm/test-config
+GET  /api/settings/models
 
 # 月度资料批次 | Monthly document batches
 POST /api/batches
 GET  /api/batches
 GET  /api/batches/{id}
 GET  /api/batches/{id}/documents
+GET  /api/batches/{id}/export/excel
 POST /api/batches/{id}/reprocess
 ```
 
@@ -381,6 +397,8 @@ POST /api/batches/{id}/reprocess
 重处理请求体可为空，或传 `{"document_ids":[1,2]}`。只会重置人工复核/失败且仍可处理的文档；处理中、视频、汇总 PDF 和超像素长图不会重复领取。重新安排后批次回到 `UPLOADED`，随后进入 `PROCESSING`。
 
 `POST /api/batches` 成功返回 `202` 和 `Location: /api/batches/{id}`；路径/文件业务校验失败返回 `400`，表单格式失败返回 `422`，批次不存在返回 `404`。列表统一返回 `{items,total,page,page_size}`。
+
+`GET /api/batches/{id}/export/excel` 下载当前批次的全部文档记录，不受文档分页影响；不存在的批次返回 `404`。前端仅在批次进入终态（`COMPLETED` 或 `FAILED`）后启用导出按钮。
 
 完整 API 文档请访问 http://localhost:18080/docs
 

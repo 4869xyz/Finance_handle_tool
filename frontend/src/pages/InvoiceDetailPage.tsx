@@ -562,14 +562,14 @@ function InvoiceDetailPage() {
                 {invoice.file_type === 'pdf' ? (
                   <iframe
                     src={getInvoiceFileUrl(invoice.id)}
-                    style={{ width: '100%', height: 600, border: 'none' }}
+                    className={styles.previewFrame}
                     title="PDF Preview"
                   />
                 ) : (
                   <img
                     src={getInvoiceFileUrl(invoice.id)}
                     alt="Invoice"
-                    style={{ width: '100%', maxHeight: 600, objectFit: 'contain' }}
+                    className={styles.previewImage}
                   />
                 )}
               </div>

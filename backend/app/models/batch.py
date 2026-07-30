@@ -98,6 +98,11 @@ class ProcessingBatch(Base):
         back_populates="batch",
         cascade="all, delete-orphan",
     )
+    review_references = relationship(
+        "BatchReviewReference",
+        back_populates="batch",
+        cascade="all, delete-orphan",
+    )
 
 
 class SourceDocument(Base):
@@ -174,3 +179,6 @@ class SourceDocument(Base):
 
     batch = relationship("ProcessingBatch", back_populates="documents")
 
+
+# Register the related model for workers that import batch models without routers.
+from app.models.review_reference import BatchReviewReference  # noqa: E402,F401
