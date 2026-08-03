@@ -48,6 +48,8 @@ const FALLBACK_MODELS: Record<string, ModelInfo[]> = {
     { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash', vision: true },
   ],
   qwen: [
+    { id: 'qwen3.7-plus', name: 'Qwen 3.7 Plus', vision: true },
+    { id: 'qwen3-vl-plus', name: 'Qwen 3 VL Plus', vision: true },
     { id: 'qwen2.5-vl-72b-instruct', name: 'Qwen 2.5 VL 72B', vision: true },
     { id: 'qwen-turbo', name: 'Qwen Turbo', vision: false },
   ],

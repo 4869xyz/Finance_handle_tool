@@ -114,6 +114,16 @@ class ReprocessResponse(BaseModel):
     message: str
 
 
+class ReconcileResponse(BaseModel):
+    batch_id: int
+    status: str
+    total_records: int
+    confirmed_groups: int
+    review_groups: int
+    eligible_total: str | None
+    message: str
+
+
 class ReviewReferenceResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

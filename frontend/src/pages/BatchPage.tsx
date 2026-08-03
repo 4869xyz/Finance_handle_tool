@@ -37,6 +37,7 @@ import {
   listBatchDocuments,
   listDocumentBatches,
   listBatchReviewReferences,
+  reconcileDocumentBatch,
   reprocessDocumentBatch,
   uploadBatchReviewReference,
 } from '../services/api';
@@ -132,6 +133,7 @@ export default function BatchPage() {
   const [documentPageSize, setDocumentPageSize] = useState(20);
   const [loadingBatch, setLoadingBatch] = useState(false);
   const [reprocessing, setReprocessing] = useState(false);
+  const [reconciling, setReconciling] = useState(false);
   const [exportingFiltered, setExportingFiltered] = useState(false);
   const [uploadingReference, setUploadingReference] = useState(false);
   const [reviewReferences, setReviewReferences] = useState<ReviewReference[]>([]);
@@ -246,6 +248,23 @@ export default function BatchPage() {
       message.error(errorMessage(error));
     } finally {
       setReprocessing(false);
+    }
+  };
+
+  const handleReconcile = async () => {
+    if (!selectedId || !batch || !TERMINAL_BATCH_STATUSES.has(batch.status)) return;
+    setReconciling(true);
+    try {
+      const response = await reconcileDocumentBatch(selectedId);
+      const detail = response.review_groups
+        ? `，${response.review_groups} 个候选组需要人工确认`
+        : '';
+      message.info(`${response.message}${detail}`);
+      await refreshSelected(selectedId);
+    } catch (error) {
+      message.error(errorMessage(error));
+    } finally {
+      setReconciling(false);
     }
   };
 
@@ -531,6 +550,14 @@ export default function BatchPage() {
                   onClick={handleFilteredExport}
                 >
                   生成审核及分类汇总表格
+                </Button>
+                <Button
+                  icon={<ReloadOutlined />}
+                  loading={reconciling}
+                  disabled={!TERMINAL_BATCH_STATUSES.has(batch.status)}
+                  onClick={handleReconcile}
+                >
+                  重新核对主辅凭证
                 </Button>
                 <Button
                   icon={<ReloadOutlined />}

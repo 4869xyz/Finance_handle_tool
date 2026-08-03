@@ -31,3 +31,15 @@ docker compose up -d frontend
 ```
 
 如果浏览器仍显示旧错误，访问 `http://127.0.0.1:15173`，并按 `Ctrl+F5` 强制刷新。端口映射定义在 [docker-compose.yml](F:/Dene_internship/0721finance_charge_reimbursement/finance_code/Finance_handle_tool/docker-compose.yml:34)。
+
+# 重启后端
+docker compose restart backend
+
+# 重启前端，注意正确名称是 frontend，不是 fronted
+docker compose restart frontend
+
+# 重启 OCR 后台任务
+docker compose restart ocr_worker
+
+# 重启 PostgreSQL
+docker compose restart db

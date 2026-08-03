@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 DEFAULT_CHAT_MAX_OUTPUT_TOKENS = 1000
+DEFAULT_VISION_MAX_OUTPUT_TOKENS = 1500
 QWEN_MAX_OUTPUT_TOKENS = 32768
 
 
@@ -122,7 +123,15 @@ class BaseLLMProvider(ABC):
         """Check if provider supports vision/image input."""
         return False
     #看图的函数，带图片的调用这个
-    def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png") -> str:
+    def vision_completion(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        image_data: bytes,
+        mime_type: str = "image/png",
+        *,
+        max_output_tokens: int | None = None,
+    ) -> str:
         """Send vision completion request with image and return response content.
 
         Args:
@@ -198,7 +207,7 @@ class OpenAIProvider(BaseLLMProvider):
         )
         return _openai_compatible_text(response)
 
-    def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png") -> str:
+    def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png", *, max_output_tokens: int | None = None) -> str:
         model = settings.openai_model
         base64_image = base64.b64encode(image_data).decode("utf-8")
         response = self.client.chat.completions.create(
@@ -217,9 +226,12 @@ class OpenAIProvider(BaseLLMProvider):
                 }
             ],
             temperature=0.1,
-            **_get_max_tokens_param(model, 1500),
+            **_get_max_tokens_param(
+                model,
+                max_output_tokens or DEFAULT_VISION_MAX_OUTPUT_TOKENS,
+            ),
         )
-        return response.choices[0].message.content.strip()
+        return _openai_compatible_text(response)
 
 
 class AnthropicProvider(BaseLLMProvider):
@@ -273,11 +285,11 @@ class AnthropicProvider(BaseLLMProvider):
             raise LLMOutputTruncatedError("Model output reached the token limit")
         return response.content[0].text.strip()
 
-    def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png") -> str:
+    def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png", *, max_output_tokens: int | None = None) -> str:
         base64_image = base64.b64encode(image_data).decode("utf-8")
         response = self.client.messages.create(
             model=settings.anthropic_model,
-            max_tokens=1500,
+            max_tokens=max_output_tokens or DEFAULT_VISION_MAX_OUTPUT_TOKENS,
             system=system_prompt,
             messages=[
                 {
@@ -296,6 +308,8 @@ class AnthropicProvider(BaseLLMProvider):
                 }
             ],
         )
+        if getattr(response, "stop_reason", None) == "max_tokens":
+            raise LLMOutputTruncatedError("Model output reached the token limit")
         return response.content[0].text.strip()
 
 
@@ -361,7 +375,7 @@ class GoogleProvider(BaseLLMProvider):
         )
         return response.text.strip()
 
-    def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png") -> str:
+    def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png", *, max_output_tokens: int | None = None) -> str:
         from PIL import Image
         from io import BytesIO
 
@@ -371,7 +385,14 @@ class GoogleProvider(BaseLLMProvider):
         # Combine system and user prompts
         full_prompt = f"{system_prompt}\n\n{user_prompt}"
 
-        response = self.model.generate_content([full_prompt, image])
+        response = self.model.generate_content(
+            [full_prompt, image],
+            generation_config={
+                "max_output_tokens": (
+                    max_output_tokens or DEFAULT_VISION_MAX_OUTPUT_TOKENS
+                )
+            },
+        )
         return response.text.strip()
 
 
@@ -379,7 +400,7 @@ class QwenProvider(BaseLLMProvider):
     """Alibaba Qwen provider (OpenAI-compatible)."""
 
     # Qwen VL / OCR models support vision (invoice image parsing)
-    # Include qwen2.5-vl / qwen3.5-* so dotted version names match correctly
+    # Include native multimodal model families so dotted version names match correctly
     VISION_MODELS = [
         "qwen-vl",
         "qwen2-vl",
@@ -387,6 +408,7 @@ class QwenProvider(BaseLLMProvider):
         "qwen3-vl",
         "qwen3.5-vl",
         "qwen3.5-ocr",
+        "qwen3.7-plus",
         "qwen-vl-ocr",
     ]
 
@@ -442,7 +464,7 @@ class QwenProvider(BaseLLMProvider):
         )
         return _openai_compatible_text(response)
 
-    def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png") -> str:
+    def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png", *, max_output_tokens: int | None = None) -> str:
         base64_image = base64.b64encode(image_data).decode("utf-8")
         response = self.client.chat.completions.create(
             model=settings.qwen_model,
@@ -460,10 +482,10 @@ class QwenProvider(BaseLLMProvider):
                 }
             ],
             temperature=0.1,
-            max_tokens=1500,
+            max_tokens=max_output_tokens or DEFAULT_VISION_MAX_OUTPUT_TOKENS,
             response_format={"type": "json_object"},
         )
-        return response.choices[0].message.content.strip()
+        return _openai_compatible_text(response)
 
 
 class DeepSeekProvider(BaseLLMProvider):
@@ -566,7 +588,7 @@ class ZhipuProvider(BaseLLMProvider):
         )
         return _openai_compatible_text(response)
 
-    def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png") -> str:
+    def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png", *, max_output_tokens: int | None = None) -> str:
         base64_image = base64.b64encode(image_data).decode("utf-8")
         response = self.client.chat.completions.create(
             model=settings.zhipu_model,
@@ -583,7 +605,7 @@ class ZhipuProvider(BaseLLMProvider):
                 }
             ],
             temperature=0.1,
-            max_tokens=1500,
+            max_tokens=max_output_tokens or DEFAULT_VISION_MAX_OUTPUT_TOKENS,
         )
         return response.choices[0].message.content.strip()
 

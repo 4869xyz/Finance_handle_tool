@@ -1,6 +1,7 @@
 from datetime import date
 from decimal import Decimal
 from io import BytesIO
+from types import SimpleNamespace
 
 from openpyxl import Workbook
 from app.models.batch import (
@@ -331,3 +332,20 @@ def test_missing_currency_is_not_a_classification_risk_in_rmb_mode():
         object(),
         missing_classification,
     ) == "金额缺失"
+
+
+def test_source_validation_detail_is_included_in_classification_risk():
+    source = document(
+        description="打印纸采购",
+        status=ProcessingStatus.NEEDS_MANUAL_REVIEW,
+    )
+    source.status_detail = "LLM与OCR/Python结果不一致：金额"
+    classification = classify_expense_by_rule(source)
+    decision = SimpleNamespace(
+        outcome=SimpleNamespace(value="保留"),
+        reason="",
+    )
+
+    risk = classification_risk_reason(source, decision, classification)
+
+    assert "LLM与OCR/Python结果不一致：金额" in risk

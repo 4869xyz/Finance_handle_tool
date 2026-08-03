@@ -109,6 +109,7 @@ Routers (health / invoices / batches / settings)
     │
     ├─ invoice_service → ocr_service + llm_service + audit_service
     └─ batch_service → document_service → ocr_service + llm_service
+                     → document_reconciliation_service → llm_service
     ▼
 Models + Database (PostgreSQL)
 ```
@@ -150,17 +151,22 @@ Models + Database (PostgreSQL)
   → 其余文档由全局并发 2 的后台协调器领取
   → PDF 全页文本层或 PaddleOCR
   → 正文确定性分类；歧义时调用已配置 LLM
-  → 严格 JSON Schema 提取 + 类型关键字段矩阵
+  → LLM 按类型 Prompt 主提取；图片同时输入原图和 OCR 文字
+  → LLM 调用/响应无效或全部关键字段为空时，整单使用 OCR/Python 规则兜底
+  → Prompt 4.0 严格 JSON Schema 拆分独立订单、行程和转账，Decimal 验算文件内金额
   → RECOGNIZED / NEEDS_MANUAL_REVIEW / FAILED
   → 批次无活动文档后 COMPLETED
+  → Python 生成跨文件重复候选，核对 LLM 判断关系并选择主凭证
+  → Python 校验引用、置信度和金额一致性，将 `_reconciliation` 写回原 JSON
 ```
 
 允许的路径形态为 `发票/文件.pdf` 或 `任意根目录/发票/文件.pdf`，`补票`、`支付凭证` 同理；允许来源目录内继续嵌套，三类来源不要求全部出现。扩展名白名单为 PDF、JPG/JPEG、PNG、MP4/MOV/AVI/MKV。员工与月份来自表单（月份 `YYYY-MM`），不解析不透明根目录。
 
 关键不变量：
 
-- 文件名和目录名不能提供日期、金额、发票号等业务字段。
-- 多笔独立交易没有可信汇总金额时，公开金额为空，候选交易保留在 JSON。
+- 文件名和目录名不能提供日期、金额、对方、号码或单据类型；唯一例外是文件内无法获得有效摘要时，可将去扩展名后的文件名作为 `description` 最后兜底，并记录来源。
+- 多笔独立交易写入 `extracted_fields_json.records`；只有每笔金额和原文证据完整时才计算文件级金额。
+- 跨文件确认重复只允许一个主凭证计入；疑似或未知关系不输出部分合计。
 - 单文档失败不会让正常批次失败；批次 `FAILED` 只表示协调中断或致命失败。
 - 启动恢复把遗留的活动文档标为 `PROCESS_INTERRUPTED`，由用户显式重新处理。
 - `PROCESS_INTERRUPTED`、`MULTIPLE_TRANSACTIONS` 等是 `status_reason` 原因码，不是处理状态。
@@ -198,9 +204,11 @@ LLM 密钥/模型：backend/.env + /api/settings
 - **批次视频**：仅存路径、大小、哈希和人工复核原因，`source_documents.file_data` 为空
 - **其他批次文件**：原始字节存 `source_documents.file_data`；哈希仅审计，不自动去重
 - **导出 CSV/Excel**：内存生成后直接下载，不落盘归档
-- **审核及分类汇总**：从 `source_documents` 和批次辅助表即时计算；两张分类表按费用组连续排列 A:J 明细，K:N 的申请人、费用类型、详细事项和来源内合计纵向合并到对应明细行，不推断支付主体，发票与支付不做跨来源差额判断；技术证据进入独立的“分类审计明细”工作表，不写回数据库
+- **交易与核对事实**：单文件交易保存在 `source_documents.extracted_fields_json.records`；批次主辅关系、主凭证引用、置信度、证据和去重计入金额保存在同一 JSON 的 `_reconciliation`，不新增表或列
+- **审核及分类汇总**：工作簿保持 7 张表；“识别结果”一文件一行，剔除、两张分类表和分类审计按交易记录一笔一行。分类表按费用组连续排列 A:J 明细，K:N 的申请人、费用类型、详细事项和去重合计纵向合并；疑似/未知重复使相关组金额留空
 - **人民币单币种**：批次资料不提取、不返回、不展示币种，也不按历史币种值拆分汇总；`source_documents.currency` 旧列仅为数据库兼容保留，存在金额缺失时仍不输出不完整的部分合计
 - **分类规则 2.0**：优先顺序为差旅费、交通费、快递费、物流费、项目成本、招待费、职工福利费，办公费和其他明确类型继续自适应；福利类历史名称统一归一为“职工福利费”，“合计”和“会计”属于无效费用类型，辅助表中的无效标签不参与强匹配分类
+- **字段提取 Prompt 4.0**：月度资料由 LLM 按发票、支付、订单、行程/车票、收据/其他规则主提取并拆分独立交易；所有交易级金额保留两位小数字符串和原文证据。合法模型结果不与 OCR/Python 逐字段核对或补空，只有模型调用/响应无效或全部关键字段为空时才整单规则兜底
 
 ---
 
@@ -227,6 +235,8 @@ LLM 密钥/模型：backend/.env + /api/settings
 | `services/batch_service.py` | 路径校验、流式登记、特殊规则、领取、统计、恢复和重试 |
 | `services/document_service.py` | 通用分类、严格提取、关键字段校验与公开字段映射 |
 | `services/document_prompts.py` | 多资料分类/提取 Prompt |
+| `services/expense_record_service.py` | 把文件级 JSON 转为下游一笔一行的交易视图，兼容历史数据 |
+| `services/document_reconciliation_service.py` | 跨文件候选生成、LLM 主辅关系判断、Python 裁决和 JSON 持久化 |
 | `services/ocr_service.py` | PaddleOCR + 增值税字段规则抽取 |
 | `services/llm_service.py` | 多厂商 Vision 调用与 JSON 解析 |
 | `services/prompts.py` | 中国发票 Vision Prompt / Schema |

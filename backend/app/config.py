@@ -28,7 +28,7 @@ class Settings(BaseSettings):
 
     # Qwen (Alibaba)
     qwen_api_key: str = ""
-    qwen_model: str = "qwen3-vl-plus"
+    qwen_model: str = "qwen3.7-plus"
     qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
     # DeepSeek

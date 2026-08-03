@@ -16,6 +16,7 @@ import type {
   BatchListResponse,
   BatchUploadItem,
   ProcessingBatch,
+  ReconcileResponse,
   ReprocessResponse,
   ReviewReference,
   ReviewReferenceListResponse,
@@ -103,6 +104,13 @@ export const reprocessDocumentBatch = async (
     `/batches/${id}/reprocess`,
     documentIds ? { document_ids: documentIds } : {}
   );
+  return response.data;
+};
+
+export const reconcileDocumentBatch = async (
+  id: number
+): Promise<ReconcileResponse> => {
+  const response = await api.post(`/batches/${id}/reconcile`);
   return response.data;
 };
 

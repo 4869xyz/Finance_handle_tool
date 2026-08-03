@@ -105,6 +105,16 @@ export interface ReprocessResponse {
   message: string;
 }
 
+export interface ReconcileResponse {
+  batch_id: number;
+  status: 'COMPLETED' | 'REVIEW_REQUIRED';
+  total_records: number;
+  confirmed_groups: number;
+  review_groups: number;
+  eligible_total: string | null;
+  message: string;
+}
+
 export interface ReviewReference {
   id: number;
   batch_id: number;
@@ -168,6 +178,9 @@ export const reasonLabels: Record<string, string> = {
   LLM_UNAVAILABLE: '模型服务不可用，规则结果不足以自动通过',
   LOW_CLASSIFICATION_CONFIDENCE: '文档类型置信度不足',
   LOW_EXTRACTION_CONFIDENCE: '字段提取置信度不足',
+  OCR_LLM_FIELD_CONFLICT: 'LLM与OCR/Python字段核对不一致',
+  CALCULATED_AMOUNT_REVIEW: '模型计算金额需要人工复核',
+  TRANSACTION_RECORD_REVIEW: '交易记录金额或明细验算需要人工复核',
   MISSING_CRITICAL_FIELDS: '缺少关键字段',
   UNKNOWN_DOCUMENT_TYPE: '无法可靠判断文档类型',
   PROCESSING_ERROR: '文档处理失败',

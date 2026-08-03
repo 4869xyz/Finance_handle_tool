@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import logging
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
@@ -22,6 +23,9 @@ from app.models.batch import (
     SourceDocument,
     SourceFolder,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 SOURCE_FOLDER_NAMES = {
@@ -154,12 +158,14 @@ def _special_document_values(
     content: bytes | None,
 ) -> dict:
     settings = get_settings()
+    filename_summary = path.file_name.rsplit(".", 1)[0].strip(" ._-") or None
     if path.file_type in VIDEO_EXTENSIONS:
         return {
             "document_type": DocumentType.VIDEO,
             "processing_status": ProcessingStatus.NEEDS_MANUAL_REVIEW,
             "status_reason": "UNSUPPORTED_VIDEO",
             "status_detail": "视频文件暂不处理，需要人工处理",
+            "description": filename_summary,
         }
     if _normalized_name(path.file_name) == "PDF合并.pdf":
         return {
@@ -167,6 +173,7 @@ def _special_document_values(
             "processing_status": ProcessingStatus.SKIPPED,
             "status_reason": "DUPLICATE_SUMMARY_PDF",
             "status_detail": "重复汇总 PDF，已跳过",
+            "description": filename_summary,
         }
     if path.file_type in IMAGE_EXTENSIONS and content is not None:
         try:
@@ -181,6 +188,7 @@ def _special_document_values(
                         f"图片像素数 {pixels} 超过限制 "
                         f"{settings.batch_image_max_pixels}"
                     ),
+                    "description": filename_summary,
                 }
         except (UnidentifiedImageError, OSError) as exc:
             raise BatchValidationError(
@@ -356,6 +364,7 @@ async def _mark_document_failed(document_id: int, detail: str) -> None:
 
 
 async def process_document_id(document_id: int) -> bool:
+    should_reconcile = False
     async with async_session_maker() as db:
         claimed = await claim_document(db, document_id)
         if not claimed:
@@ -388,6 +397,7 @@ async def process_document_id(document_id: int) -> bool:
             file_data = document.file_data
             file_type = document.file_type
             source_folder = document.source_folder
+            file_name = document.file_name
 
         from app.services.document_service import process_document_content
 
@@ -396,6 +406,7 @@ async def process_document_id(document_id: int) -> bool:
             file_data=file_data,
             file_type=file_type,
             source_folder=source_folder,
+            file_name=file_name,
         )
         async with async_session_maker() as db:
             await db.execute(
@@ -407,11 +418,24 @@ async def process_document_id(document_id: int) -> bool:
                 )
                 .values(**processed.as_update_values())
             )
-            await refresh_batch_stats(db, batch_id)
+            batch = await refresh_batch_stats(db, batch_id)
+            should_reconcile = bool(batch and batch.status == BatchStatus.COMPLETED)
             await db.commit()
     except Exception as exc:
         safe_detail = f"文档处理异常：{exc.__class__.__name__}"
         await _mark_document_failed(document_id, safe_detail)
+    if should_reconcile and batch_id is not None:
+        try:
+            from app.services.document_reconciliation_service import reconcile_batch
+
+            async with async_session_maker() as db:
+                await reconcile_batch(db, batch_id)
+        except Exception as exc:
+            logger.warning(
+                "Automatic reconciliation failed for batch=%s: %s",
+                batch_id,
+                exc.__class__.__name__,
+            )
     return True
 
 
@@ -500,6 +524,15 @@ async def prepare_reprocess(
         document.processing_started_at = None
 
     if processable:
+        all_documents_result = await db.execute(
+            select(SourceDocument).where(SourceDocument.batch_id == batch_id)
+        )
+        for batch_document in all_documents_result.scalars().all():
+            payload = batch_document.extracted_fields_json
+            if isinstance(payload, dict) and "_reconciliation" in payload:
+                cleaned_payload = dict(payload)
+                cleaned_payload.pop("_reconciliation", None)
+                batch_document.extracted_fields_json = cleaned_payload
         batch_result = await db.execute(
             select(ProcessingBatch).where(ProcessingBatch.id == batch_id)
         )

@@ -28,6 +28,74 @@ from app.services.expense_classification_service import (
     ExpenseClassificationStatus,
     build_expense_summary_groups,
 )
+from app.services.document_reconciliation_service import ReconciliationSummary
+
+
+async def test_manual_batch_reconciliation_endpoint_requires_terminal_batch(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def override_db():
+        async with maker() as session:
+            yield session
+
+    calls = []
+
+    async def fake_reconcile(_db, batch_id):
+        calls.append(batch_id)
+        return ReconciliationSummary(
+            batch_id=batch_id,
+            status="COMPLETED",
+            total_records=3,
+            confirmed_groups=1,
+            review_groups=0,
+            eligible_total=Decimal("88.50"),
+            message="跨文件核对完成",
+        )
+
+    monkeypatch.setattr(
+        "app.services.document_reconciliation_service.reconcile_batch",
+        fake_reconcile,
+    )
+    app.dependency_overrides[get_db] = override_db
+    try:
+        async with maker() as db:
+            db.add_all([
+                ProcessingBatch(
+                    id=1,
+                    employee_name="张三",
+                    expense_month=date(2025, 7, 1),
+                    status=BatchStatus.PROCESSING,
+                ),
+                ProcessingBatch(
+                    id=2,
+                    employee_name="李四",
+                    expense_month=date(2025, 7, 1),
+                    status=BatchStatus.COMPLETED,
+                ),
+            ])
+            await db.commit()
+
+        async with AsyncClient(app=app, base_url="http://test") as client:
+            active = await client.post("/api/batches/1/reconcile")
+            assert active.status_code == 409
+            completed = await client.post("/api/batches/2/reconcile")
+            assert completed.status_code == 200
+            assert completed.json() == {
+                "batch_id": 2,
+                "status": "COMPLETED",
+                "total_records": 3,
+                "confirmed_groups": 1,
+                "review_groups": 0,
+                "eligible_total": "88.50",
+                "message": "跨文件核对完成",
+            }
+            assert calls == [2]
+    finally:
+        app.dependency_overrides.clear()
+        await engine.dispose()
 
 
 async def test_batch_api_create_query_and_atomic_mismatch(monkeypatch):
@@ -468,9 +536,13 @@ async def test_filtered_batch_export_has_auditable_seven_sheet_reconciliation(mo
             assert "币种" not in [cell.value for cell in invoice_classification[1]]
             assert "币种" not in [cell.value for cell in payment_classification[1]]
             assert classification_audit.max_row == 6
-            assert classification_audit.max_column == 15
+            assert classification_audit.max_column == 21
             assert classification_audit["G1"].value == "分类状态"
             assert classification_audit["O1"].value == "分类规则版本"
+            assert classification_audit["P1"].value == "记录引用"
+            assert classification_audit["Q1"].value == "跨文件关系"
+            assert classification_audit["R1"].value == "核对角色"
+            assert classification_audit["U1"].value == "去重计入金额"
             assert [
                 cell.value
                 for cell in invoice_classification["A"]

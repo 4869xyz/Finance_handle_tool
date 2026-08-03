@@ -793,6 +793,16 @@ def classification_risk_reason(
             )
         )
     if (
+        document.processing_status != ProcessingStatus.RECOGNIZED
+        and document.status_detail
+    ):
+        reasons.append(document.status_detail)
+    reconciliation_role = getattr(document, "reconciliation_role", None)
+    if reconciliation_role == "AUXILIARY":
+        reasons.append("跨文件核对：辅助凭证，本记录不重复计入合计")
+    elif reconciliation_role == "UNRESOLVED":
+        reasons.append("跨文件核对：重复关系待确认，相关分类合计留空")
+    if (
         classification.expense_type == "招待费"
         and classification.hospitality_target == "待补充"
     ):
@@ -851,9 +861,10 @@ def build_expense_summary_groups(
                 hospitality_target=target,
             ),
         )
+        amount_value = getattr(document, "eligible_amount", document.amount)
         amount = (
-            Decimal(str(document.amount)).quantize(Decimal("0.01"))
-            if document.amount is not None
+            Decimal(str(amount_value)).quantize(Decimal("0.01"))
+            if amount_value is not None
             else None
         )
         if document.source_folder == SourceFolder.PAYMENT_EVIDENCE:

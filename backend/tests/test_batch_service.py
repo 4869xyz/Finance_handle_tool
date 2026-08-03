@@ -85,10 +85,13 @@ async def test_special_files_short_circuit_and_video_binary_is_not_stored(
         )
         documents = list(result.scalars())
         assert documents[0].status_reason == "DUPLICATE_SUMMARY_PDF"
+        assert documents[0].description == "PDF合并"
         assert documents[1].document_type == DocumentType.VIDEO
+        assert documents[1].description == "证明"
         assert documents[1].file_data is None
         assert documents[1].file_hash
         assert documents[2].status_reason == "IMAGE_PIXEL_LIMIT_EXCEEDED"
+        assert documents[2].description == "长图"
         assert documents[2].file_data is not None
 
 

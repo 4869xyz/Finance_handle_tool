@@ -187,12 +187,13 @@ FALLBACK_MODELS = {
         {"id": "google/gemini-1.5-flash", "name": "Gemini 1.5 Flash", "vision": True},
     ],
     "qwen": [
-        {"id": "qwen/qwen3-vl-plus", "name": "Qwen 3 VL Plus", "vision": True},
-        {"id": "qwen/qwen3-vl-flash", "name": "Qwen 3 VL Flash", "vision": True},
-        {"id": "qwen/qwen3.5-ocr", "name": "Qwen 3.5 OCR", "vision": True},
-        {"id": "qwen/qwen2.5-vl-72b-instruct", "name": "Qwen 2.5 VL 72B", "vision": True},
-        {"id": "qwen/qwen-vl-plus", "name": "Qwen VL Plus", "vision": True},
-        {"id": "qwen/qwen-turbo", "name": "Qwen Turbo", "vision": False},
+        {"id": "qwen3.7-plus", "name": "Qwen 3.7 Plus", "vision": True},
+        {"id": "qwen3-vl-plus", "name": "Qwen 3 VL Plus", "vision": True},
+        {"id": "qwen3-vl-flash", "name": "Qwen 3 VL Flash", "vision": True},
+        {"id": "qwen3.5-ocr", "name": "Qwen 3.5 OCR", "vision": True},
+        {"id": "qwen2.5-vl-72b-instruct", "name": "Qwen 2.5 VL 72B", "vision": True},
+        {"id": "qwen-vl-plus", "name": "Qwen VL Plus", "vision": True},
+        {"id": "qwen-turbo", "name": "Qwen Turbo", "vision": False},
     ],
     "deepseek": [
         {"id": "deepseek/deepseek-chat", "name": "DeepSeek Chat", "vision": False},
@@ -225,9 +226,8 @@ def get_models_with_fallback(
     """
     provider_lower = provider.lower()
 
-    # Zhipu uses native SDK with different model IDs than OpenRouter
-    # Always use the hardcoded list for Zhipu
-    if provider_lower == "zhipu":
+    # Qwen and Zhipu use provider-native model IDs rather than OpenRouter IDs.
+    if provider_lower in {"qwen", "zhipu"}:
         fallback = FALLBACK_MODELS.get(provider_lower, [])
         if vision_only:
             return [m for m in fallback if m.get("vision", False)]

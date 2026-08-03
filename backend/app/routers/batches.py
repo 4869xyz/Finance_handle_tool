@@ -38,6 +38,7 @@ from app.schemas.batch import (
     BatchResponse,
     ReprocessRequest,
     ReprocessResponse,
+    ReconcileResponse,
     ReviewReferenceListResponse,
     ReviewReferenceResponse,
     SourceDocumentListResponse,
@@ -54,6 +55,10 @@ from app.services.expense_classification_service import (
     build_expense_summary_groups,
     classification_risk_reason,
     classify_expenses,
+)
+from app.services.expense_record_service import (
+    RECONCILIATION_VERSION,
+    build_expense_records,
 )
 from app.services.review_reference_service import (
     MAX_REFERENCE_FILE_SIZE,
@@ -104,6 +109,9 @@ STATUS_REASON_LABELS = {
     "LLM_UNAVAILABLE": "模型服务不可用，规则结果不足以自动通过",
     "LOW_CLASSIFICATION_CONFIDENCE": "文档类型置信度不足",
     "LOW_EXTRACTION_CONFIDENCE": "字段提取置信度不足",
+    "OCR_LLM_FIELD_CONFLICT": "LLM与OCR/Python字段核对不一致",
+    "CALCULATED_AMOUNT_REVIEW": "模型计算金额需要人工复核",
+    "TRANSACTION_RECORD_REVIEW": "交易记录金额或明细验算需要人工复核",
     "MISSING_CRITICAL_FIELDS": "缺少关键字段",
     "UNKNOWN_DOCUMENT_TYPE": "无法可靠判断文档类型",
     "PROCESSING_ERROR": "文档处理失败",
@@ -165,6 +173,12 @@ CLASSIFICATION_AUDIT_HEADERS = [
     "辅助匹配依据",
     "核对键",
     "分类规则版本",
+    "记录引用",
+    "跨文件关系",
+    "核对角色",
+    "主凭证引用",
+    "核对证据",
+    "去重计入金额",
 ]
 
 
@@ -379,6 +393,7 @@ def _configure_classification_audit_worksheet(worksheet):
         "A": 8, "B": 13, "C": 10, "D": 30, "E": 14,
         "F": 14, "G": 16, "H": 14, "I": 42, "J": 18,
         "K": 24, "L": 12, "M": 52, "N": 38, "O": 14,
+        "P": 18, "Q": 20, "R": 16, "S": 18, "T": 48, "U": 16,
     }
     for column, width in widths.items():
         worksheet.column_dimensions[column].width = width
@@ -390,6 +405,8 @@ def _configure_classification_audit_worksheet(worksheet):
             row[index].alignment = Alignment(vertical="top", wrap_text=True)
         row[1].number_format = "yyyy-mm-dd"
         row[7].number_format = "0.0%"
+        if len(row) >= 21:
+            row[20].number_format = "#,##0.00"
 
 
 def _append_classification_worksheet(
@@ -558,6 +575,16 @@ def _append_classification_audit_worksheet(
             classification.reference_evidence or decision.reference_evidence,
             classification.reconciliation_key,
             classification.rule_version,
+            getattr(document, "record_ref", f"{document.id}:R1"),
+            getattr(document, "reconciliation_relation", ""),
+            getattr(document, "reconciliation_role", ""),
+            getattr(document, "reconciliation_primary_ref", "") or "",
+            getattr(document, "reconciliation_evidence", "") or "",
+            (
+                float(document.eligible_amount)
+                if getattr(document, "eligible_amount", None) is not None
+                else None
+            ),
         ])
         for cell in worksheet[worksheet.max_row]:
             cell.value = _safe_excel_text(cell.value)
@@ -862,6 +889,23 @@ async def export_filtered_batch_documents_excel(
         .order_by(SourceDocument.id)
     )
     documents = list(result.scalars().all())
+    reconciliation_current = all(
+        isinstance(document.extracted_fields_json, dict)
+        and isinstance(document.extracted_fields_json.get("_reconciliation"), dict)
+        and document.extracted_fields_json["_reconciliation"].get("version")
+        == RECONCILIATION_VERSION
+        for document in documents
+    )
+    if not reconciliation_current:
+        from app.services.document_reconciliation_service import reconcile_batch
+
+        await reconcile_batch(db, batch_id)
+        result = await db.execute(
+            select(SourceDocument)
+            .where(SourceDocument.batch_id == batch_id)
+            .order_by(SourceDocument.id)
+        )
+        documents = list(result.scalars().all())
     profile_result = await db.execute(
         select(CompanyProfile).order_by(CompanyProfile.version.desc()).limit(1)
     )
@@ -874,24 +918,25 @@ async def export_filtered_batch_documents_excel(
     )
     reference = reference_result.scalar_one_or_none()
 
+    records = build_expense_records(documents)
     decisions = await asyncio.to_thread(
         filter_documents,
-        documents,
+        records,
         profile,
         reference,
     )
     decision_by_document = {decision.document_id: decision for decision in decisions}
-    if len(decision_by_document) != len(documents):
-        raise HTTPException(status_code=500, detail="筛选结果与原始资料数量不一致")
+    if len(decision_by_document) != len(records):
+        raise HTTPException(status_code=500, detail="筛选结果与交易记录数量不一致")
     classification_by_document = await asyncio.to_thread(
         classify_expenses,
-        documents,
+        records,
         reference,
     )
-    if len(classification_by_document) != len(documents):
-        raise HTTPException(status_code=500, detail="分类结果与原始资料数量不一致")
+    if len(classification_by_document) != len(records):
+        raise HTTPException(status_code=500, detail="分类结果与交易记录数量不一致")
     summary_groups = build_expense_summary_groups(
-        documents,
+        records,
         classification_by_document,
     )
 
@@ -919,8 +964,10 @@ async def export_filtered_batch_documents_excel(
     classification_audit_sheet.append(CLASSIFICATION_AUDIT_HEADERS)
 
     for index, document in enumerate(documents, start=1):
+        original_sheet.append(_document_export_row(batch, document, index))
+
+    for index, document in enumerate(records, start=1):
         base_row = _document_export_row(batch, document, index)
-        original_sheet.append(base_row)
         decision = decision_by_document[document.id]
         target = (
             payment_sheet
@@ -952,7 +999,7 @@ async def export_filtered_batch_documents_excel(
             cell.fill = fill
 
     source_rows = invoice_sheet.max_row - 1 + payment_sheet.max_row - 1
-    if source_rows != len(documents):
+    if source_rows != len(records):
         raise HTTPException(status_code=500, detail="来源工作表行数对账失败")
     expected_exception_rows = sum(
         decision.outcome != FilterOutcome.KEEP for decision in decisions
@@ -963,7 +1010,7 @@ async def export_filtered_batch_documents_excel(
     invoice_classification_rows = _append_classification_worksheet(
         invoice_classification_sheet,
         batch=batch,
-        documents=documents,
+        documents=records,
         decision_by_document=decision_by_document,
         classification_by_document=classification_by_document,
         groups=summary_groups,
@@ -972,7 +1019,7 @@ async def export_filtered_batch_documents_excel(
     payment_classification_rows = _append_classification_worksheet(
         payment_classification_sheet,
         batch=batch,
-        documents=documents,
+        documents=records,
         decision_by_document=decision_by_document,
         classification_by_document=classification_by_document,
         groups=summary_groups,
@@ -980,24 +1027,24 @@ async def export_filtered_batch_documents_excel(
     )
     _append_classification_audit_worksheet(
         classification_audit_sheet,
-        documents=documents,
+        documents=records,
         decision_by_document=decision_by_document,
         classification_by_document=classification_by_document,
     )
     expected_invoice_rows = sum(
         document.source_folder
         in {SourceFolder.INVOICE, SourceFolder.REPLACEMENT_INVOICE}
-        for document in documents
+        for document in records
     )
     expected_payment_rows = sum(
         document.source_folder == SourceFolder.PAYMENT_EVIDENCE
-        for document in documents
+        for document in records
     )
     if invoice_classification_rows != expected_invoice_rows:
         raise HTTPException(status_code=500, detail="发票补票分类明细行数对账失败")
     if payment_classification_rows != expected_payment_rows:
         raise HTTPException(status_code=500, detail="支付凭证分类明细行数对账失败")
-    if classification_audit_sheet.max_row - 1 != len(documents):
+    if classification_audit_sheet.max_row - 1 != len(records):
         raise HTTPException(status_code=500, detail="分类审计明细行数对账失败")
 
     output = BytesIO()
@@ -1012,6 +1059,35 @@ async def export_filtered_batch_documents_excel(
         headers={
             "Content-Disposition": f"attachment; filename*=UTF-8''{filename}",
         },
+    )
+
+
+@router.post(
+    "/{batch_id}/reconcile",
+    response_model=ReconcileResponse,
+)
+async def reconcile_batch_documents(
+    batch_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    batch = await db.get(ProcessingBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="批次不存在")
+    if batch.status not in {BatchStatus.COMPLETED, BatchStatus.FAILED}:
+        raise HTTPException(status_code=409, detail="请等待批次处理结束后再重新核对")
+    from app.services.document_reconciliation_service import reconcile_batch
+
+    summary = await reconcile_batch(db, batch_id)
+    return ReconcileResponse(
+        batch_id=summary.batch_id,
+        status=summary.status,
+        total_records=summary.total_records,
+        confirmed_groups=summary.confirmed_groups,
+        review_groups=summary.review_groups,
+        eligible_total=(
+            str(summary.eligible_total) if summary.eligible_total is not None else None
+        ),
+        message=summary.message,
     )
 
 
