@@ -89,6 +89,9 @@ def test_expense_type_normalization_uses_welfare_name_and_rejects_totals():
     assert normalize_expense_type("员工福利费") == "职工福利费"
     assert normalize_expense_type("合计") == "待分类"
     assert normalize_expense_type("会计") == "待分类"
+    assert normalize_expense_type("采购费") == "待分类"
+    assert normalize_expense_type("消费费") == "待分类"
+    assert normalize_expense_type("培训费") == "培训费"
 
 
 def test_explicit_transport_takes_priority_over_employee_context():
@@ -309,6 +312,46 @@ def test_summary_groups_ignore_legacy_currency_values_in_rmb_mode():
     assert group.payment_amount == Decimal("88.50")
     assert group.difference == Decimal("0.00")
     assert group.reconciliation_status == "金额一致"
+
+
+def test_summary_groups_use_recognized_amount_and_keep_available_partial_total():
+    primary = document(description="打印纸采购", amount="20.00")
+    auxiliary = document(2, description="打印纸采购", amount="20.00")
+    unresolved = document(3, description="打印纸采购", amount="12.00")
+    missing = document(4, description="打印纸采购", amount=None)
+    primary.eligible_amount = Decimal("20.00")
+    auxiliary.eligible_amount = Decimal("0.00")
+    unresolved.eligible_amount = None
+    documents = [primary, auxiliary, unresolved, missing]
+    classifications = {
+        item.id: classify_expense_by_rule(item)
+        for item in documents
+    }
+
+    groups = build_expense_summary_groups(documents, classifications)
+
+    assert len(groups) == 1
+    group = groups[0]
+    assert group.invoice_amount == Decimal("52.00")
+    assert group.invoice_has_amount is True
+    assert group.invoice_missing_amount is True
+
+
+def test_summary_group_with_all_amounts_missing_stays_without_available_amount():
+    documents = [
+        document(description="打印纸采购", amount=None),
+        document(2, description="打印纸采购", amount=None),
+    ]
+    classifications = {
+        item.id: classify_expense_by_rule(item)
+        for item in documents
+    }
+
+    group = build_expense_summary_groups(documents, classifications)[0]
+
+    assert group.invoice_amount == Decimal("0.00")
+    assert group.invoice_has_amount is False
+    assert group.invoice_missing_amount is True
 
 
 def test_missing_currency_is_not_a_classification_risk_in_rmb_mode():

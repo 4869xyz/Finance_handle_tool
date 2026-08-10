@@ -290,7 +290,7 @@ export default function BatchPage() {
       anchor.click();
       anchor.remove();
       URL.revokeObjectURL(url);
-      message.success('审核及分类汇总表格已生成；红字和金额差额请人工复核');
+      message.success('审核及分类汇总表格已生成；浅红底异常记录和风险说明请人工复核');
     } catch (error) {
       message.error(errorMessage(error));
     } finally {
@@ -544,12 +544,12 @@ export default function BatchPage() {
                   disabled={!TERMINAL_BATCH_STATUSES.has(batch.status)}
                   title={
                     TERMINAL_BATCH_STATUSES.has(batch.status)
-                      ? '保留全部资料并生成发票、支付凭证分类汇总；红字和金额差额供人工审核'
+                      ? '保留全部资料并生成发票、支付凭证分类汇总；浅红底异常记录和风险说明供人工审核'
                       : '请等待当前批次处理结束后再生成'
                   }
                   onClick={handleFilteredExport}
                 >
-                  生成审核及分类汇总表格
+                  {exportingFiltered ? '正在生成审核及分类汇总表格…' : '生成审核及分类汇总表格'}
                 </Button>
                 <Button
                   icon={<ReloadOutlined />}

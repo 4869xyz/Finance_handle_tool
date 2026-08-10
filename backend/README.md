@@ -13,6 +13,8 @@
 | `app/` | 应用源码 | 见 `app/README.md` |
 | `tests/` | 旧发票回归及批次路径、上传、短路、识别、状态和可选 PostgreSQL 集成测试 | `app/services` |
 
+`LLM_BATCH_CONCURRENCY` 控制审核及分类导出的模型批处理并发数，默认 `2`；提高该值可能受模型供应商限流影响。
+
 ## 启动
 
 通常由根目录 `docker-compose.yml` 的 `backend` 服务启动：`uvicorn app.main:app --port 18080`。

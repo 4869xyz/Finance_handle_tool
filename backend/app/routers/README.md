@@ -8,7 +8,7 @@ HTTP 接口层（薄控制器）。
 |------|------|------|
 | `health.py` | 健康检查（含 DB） | `get_db` |
 | `invoices.py` | 上传、列表、详情、文件、导出、差异处理、后台处理任务 | `invoice_service`、`get_db`、models |
-| `batches.py` | 月度批次创建/查询、文档分页、全量导出、同组明细与纵向合并分类汇总、分类审计明细和可重试文档重新处理 | `batch_service`、`expense_classification_service`、`get_db`、batch model、openpyxl |
+| `batches.py` | 月度批次创建/查询、文档分页、全量导出、缓存审核分类汇总、异常底色与表格边框、分类审计明细和可重试文档重新处理 | `batch_service`、`audit_classification_service`、`expense_classification_service`、`get_db`、batch model、openpyxl |
 | `settings.py` | LLM 配置查询/保存/连通测试 | `config`、`llm_service` |
 
 ## 约定

@@ -3,6 +3,7 @@ from decimal import Decimal
 from io import BytesIO
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.cell.cell import MergedCell
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from httpx import AsyncClient
@@ -29,6 +30,10 @@ from app.services.expense_classification_service import (
     build_expense_summary_groups,
 )
 from app.services.document_reconciliation_service import ReconciliationSummary
+from app.services.audit_classification_service import (
+    AuditClassificationMetrics,
+    AuditClassificationResults,
+)
 
 
 async def test_manual_batch_reconciliation_endpoint_requires_terminal_batch(monkeypatch):
@@ -288,6 +293,21 @@ async def test_batch_excel_export_includes_all_documents_and_typed_values():
             assert worksheet['S2'].value == 0.91
             assert worksheet['I3'].value == '已跳过'
             assert worksheet['J3'].value == '重复汇总PDF，已跳过'
+            assert worksheet['A2'].fill.fgColor.rgb.endswith('1677FF') is False
+            assert worksheet['A3'].fill.fgColor.rgb.endswith('FCE8E6')
+            assert all(
+                side.style == 'thin'
+                for side in (
+                    worksheet['A1'].border.left,
+                    worksheet['A1'].border.right,
+                    worksheet['A1'].border.top,
+                    worksheet['A1'].border.bottom,
+                    worksheet['U3'].border.left,
+                    worksheet['U3'].border.right,
+                    worksheet['U3'].border.top,
+                    worksheet['U3'].border.bottom,
+                )
+            )
 
             missing = await client.get('/api/batches/999/export/excel')
             assert missing.status_code == 404
@@ -362,8 +382,35 @@ async def test_filtered_batch_export_has_auditable_seven_sheet_reconciliation(mo
             in zip(documents, values)
         }
 
-    monkeypatch.setattr("app.routers.batches.filter_documents", fake_filter)
-    monkeypatch.setattr("app.routers.batches.classify_expenses", fake_classify)
+    async def fake_audit_classification(documents, records, profile, reference=None):
+        decisions = fake_filter(records, profile, reference)
+        classifications = fake_classify(records, reference)
+        return AuditClassificationResults(
+            decisions={decision.document_id: decision for decision in decisions},
+            classifications=classifications,
+            metrics=AuditClassificationMetrics(
+                total_records=len(records),
+                cache_hit_count=0,
+                cache_miss_count=len(records),
+                llm_batch_count=1,
+                llm_request_count=1,
+                retry_count=0,
+                elapsed_ms=1,
+            ),
+        )
+
+    monkeypatch.setattr(
+        "app.routers.batches.ensure_audit_classification_results",
+        fake_audit_classification,
+    )
+    async def reconcile_must_not_run(*_args, **_kwargs):
+        raise AssertionError("普通导出不应自动执行跨文件核对")
+
+    monkeypatch.setattr(
+        "app.routers.batches.reconcile_batch",
+        reconcile_must_not_run,
+        raising=False,
+    )
     app.dependency_overrides[get_db] = override_db
     try:
         async with maker() as db:
@@ -494,6 +541,11 @@ async def test_filtered_batch_export_has_auditable_seven_sheet_reconciliation(mo
             assert invoice["V2"].value == "保留"
             assert invoice["A2"].font.color.type != "rgb"
             assert original["A4"].font.color.type != "rgb"
+            assert original["A2"].fill.fgColor.rgb.endswith("FCE8E6") is False
+            assert original["A3"].fill.fgColor.rgb.endswith("FCE8E6") is False
+            assert original["A4"].fill.fgColor.rgb.endswith("FCE8E6")
+            assert original["A5"].fill.fgColor.rgb.endswith("FCE8E6")
+            assert original["A6"].fill.fgColor.rgb.endswith("FCE8E6") is False
             assert invoice["F3"].value == "PDF合并.pdf"
             assert invoice["V3"].value == "排除"
             assert all(
@@ -596,6 +648,22 @@ async def test_filtered_batch_export_has_auditable_seven_sheet_reconciliation(mo
             assert classification_audit["J2"].value == "RULE"
             for worksheet in workbook.worksheets:
                 assert worksheet.freeze_panes == "A2"
+                for row in worksheet.iter_rows():
+                    for cell in row:
+                        if isinstance(cell, MergedCell):
+                            continue
+                        assert cell.border.left.style == "thin"
+                        assert cell.border.right.style == "thin"
+                        assert cell.border.top.style == "thin"
+                        assert cell.border.bottom.style == "thin"
+                for merged_range in worksheet.merged_cells.ranges:
+                    top_left = worksheet.cell(merged_range.min_row, merged_range.min_col)
+                    bottom_left = worksheet.cell(merged_range.max_row, merged_range.min_col)
+                    top_right = worksheet.cell(merged_range.min_row, merged_range.max_col)
+                    assert top_left.border.top.style == "thin"
+                    assert top_left.border.left.style == "thin"
+                    assert bottom_left.border.bottom.style == "thin"
+                    assert top_right.border.right.style == "thin"
             assert invoice_classification.auto_filter.ref is None
             assert payment_classification.auto_filter.ref is None
             for worksheet in (original, invoice, payment, exception, classification_audit):
@@ -672,6 +740,77 @@ def test_classification_group_writes_summary_without_payment_subject():
     assert worksheet["M2"].value == "签字笔"
     assert worksheet["N2"].value == 10
     assert worksheet.auto_filter.ref is None
+
+
+def test_classification_group_displays_available_total_when_one_amount_is_missing():
+    batch = ProcessingBatch(
+        id=1,
+        employee_name="张三",
+        expense_month=date(2025, 7, 1),
+        status=BatchStatus.COMPLETED,
+    )
+    documents = [
+        SourceDocument(
+            id=document_id,
+            batch_id=1,
+            source_folder=SourceFolder.INVOICE,
+            relative_path=f"发票/{document_id}.pdf",
+            file_name=f"{document_id}.pdf",
+            file_type="pdf",
+            file_size=1,
+            file_hash=str(document_id) * 64,
+            document_type=DocumentType.ELECTRONIC_INVOICE,
+            processing_status=ProcessingStatus.RECOGNIZED,
+            description="打印纸采购",
+            amount=amount,
+        )
+        for document_id, amount in ((1, Decimal("10.00")), (2, None))
+    ]
+    classifications = {
+        document.id: ExpenseClassification(
+            document_id=document.id,
+            expense_type="办公费",
+            standard_subcategory="打印纸",
+            expense_item="打印纸采购",
+            hospitality_target="",
+            status=ExpenseClassificationStatus.CLASSIFIED,
+            confidence=0.95,
+            evidence="测试分类依据",
+            evidence_source="RULE",
+        )
+        for document in documents
+    }
+    decisions = {
+        document.id: FilterDecision(
+            document_id=document.id,
+            outcome=FilterOutcome.KEEP,
+            reason_code="BUSINESS_EXPENSE",
+            reason="测试原因",
+            evidence="测试证据",
+            buyer_name=None,
+            buyer_tax_id=None,
+            confidence=0.95,
+            company_profile_version=None,
+        )
+        for document in documents
+    }
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.append(_classification_headers(SourceFolder.INVOICE))
+
+    _append_classification_worksheet(
+        worksheet,
+        batch=batch,
+        documents=documents,
+        decision_by_document=decisions,
+        classification_by_document=classifications,
+        groups=build_expense_summary_groups(documents, classifications),
+        source_folder=SourceFolder.INVOICE,
+    )
+
+    assert worksheet["N2"].value == 10
+    assert worksheet["N2"].fill.fgColor.rgb.endswith("FCE8E6")
+    assert "仅包含已识别金额" in worksheet["N2"].comment.text
 
 
 async def test_review_reference_upload_versions_list_and_download():

@@ -56,7 +56,7 @@ EXPENSE_TYPE_ALIASES = {
     "快递费": {"快递费", "快递费用"},
     "物流费": {"物流费", "物流费用", "运输费"},
 }
-FORBIDDEN_EXPENSE_TYPES = {"合计", "会计"}
+FORBIDDEN_EXPENSE_TYPES = {"合计", "会计", "采购费", "消费费", "费用"}
 
 CLASSIFICATION_ERROR_LABELS = {
     "SOURCE_NOT_RECOGNIZED": "原资料未处于已识别状态",
@@ -69,6 +69,7 @@ CLASSIFICATION_ERROR_LABELS = {
     "LOW_CLASSIFICATION_CONFIDENCE": "费用分类置信度不足",
     "AUXILIARY_CLASSIFICATION_CONFLICT": "辅助表强匹配行的分类存在冲突",
     "HOSPITALITY_TARGET_MISSING": "招待费缺少明确招待对象",
+    "MODEL_REQUESTED_CLASSIFICATION_REVIEW": "分类模型标记证据需要人工确认",
 }
 
 
@@ -124,6 +125,8 @@ class ExpenseSummaryGroup:
     payment_document_ids: list[int] = field(default_factory=list)
     invoice_amount: Decimal = Decimal("0.00")
     payment_amount: Decimal = Decimal("0.00")
+    invoice_has_amount: bool = False
+    payment_has_amount: bool = False
     invoice_missing_amount: bool = False
     payment_missing_amount: bool = False
 
@@ -799,9 +802,9 @@ def classification_risk_reason(
         reasons.append(document.status_detail)
     reconciliation_role = getattr(document, "reconciliation_role", None)
     if reconciliation_role == "AUXILIARY":
-        reasons.append("跨文件核对：辅助凭证，本记录不重复计入合计")
+        reasons.append("跨文件核对：辅助凭证；分类汇总仍按识别金额计算")
     elif reconciliation_role == "UNRESOLVED":
-        reasons.append("跨文件核对：重复关系待确认，相关分类合计留空")
+        reasons.append("跨文件核对：重复关系待确认；分类汇总仍按识别金额计算")
     if (
         classification.expense_type == "招待费"
         and classification.hospitality_target == "待补充"
@@ -861,7 +864,7 @@ def build_expense_summary_groups(
                 hospitality_target=target,
             ),
         )
-        amount_value = getattr(document, "eligible_amount", document.amount)
+        amount_value = document.amount
         amount = (
             Decimal(str(amount_value)).quantize(Decimal("0.01"))
             if amount_value is not None
@@ -872,11 +875,13 @@ def build_expense_summary_groups(
             if amount is None:
                 group.payment_missing_amount = True
             else:
+                group.payment_has_amount = True
                 group.payment_amount += amount
         else:
             group.invoice_document_ids.append(document.id)
             if amount is None:
                 group.invoice_missing_amount = True
             else:
+                group.invoice_has_amount = True
                 group.invoice_amount += amount
     return sorted(groups.values(), key=_summary_sort_key)

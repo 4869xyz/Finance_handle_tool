@@ -115,12 +115,10 @@ def build_expense_records(
             records = [_legacy_record(document)]
 
         reconciliation = payload.get("_reconciliation")
-        reconciliation_records = (
-            reconciliation.get("records", {})
-            if isinstance(reconciliation, dict)
-            and isinstance(reconciliation.get("records"), dict)
-            else {}
+        reconciliation_available = isinstance(reconciliation, dict) and isinstance(
+            reconciliation.get("records"), dict
         )
+        reconciliation_records = reconciliation.get("records", {}) if reconciliation_available else {}
 
         seen_record_ids: set[str] = set()
         for index, record in enumerate(records, start=1):
@@ -145,10 +143,15 @@ def build_expense_records(
             status_detail = document.status_detail
             role = str(state.get("role") or "UNRESOLVED")
             relation = str(state.get("relation") or "unknown")
+            if not reconciliation_available:
+                role = "NOT_RECONCILED"
+                relation = "not_reconciled"
+                if not status_detail:
+                    status_detail = "尚未执行跨文件核对；分类汇总仍按识别金额计算"
             if role == "AUXILIARY":
                 status_detail = "跨文件核对：该记录为辅助凭证，不重复计入合计"
             elif role == "UNRESOLVED":
-                status_detail = "跨文件核对尚未确认，相关分类合计留空"
+                status_detail = "跨文件核对尚未确认；分类汇总仍按识别金额计算"
 
             views.append(
                 ExpenseRecordView(

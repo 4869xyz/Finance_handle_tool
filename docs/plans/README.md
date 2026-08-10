@@ -20,3 +20,6 @@
 - [月度资料 LLM 主识别与整单规则兜底实施计划](monthly_document_llm_primary_fallback_plan.md)（已完成）
 - [月度资料 Prompt 4.0 与交易级跨文件核对实施计划](monthly_transaction_reconciliation_prompt_v4_plan.md)（已完成）
 - [文件名摘要最后兜底实施计划](filename_description_fallback_plan.md)（已完成）
+- [分类汇总识别金额与 Excel 异常样式实施计划](classification_summary_recognized_amount_plan.md)（已完成）
+- [月度审核分类导出速度优化实施计划](monthly_export_speed_optimization_plan.md)（已完成）
+- [审核与费用分类 Prompt 2.0 优化计划](audit_classification_prompt_v2_plan.md)（已完成）

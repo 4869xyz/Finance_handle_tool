@@ -63,6 +63,7 @@ class Settings(BaseSettings):
     # LLM is I/O-bound (API calls), can handle more concurrent requests
     ocr_max_workers: int = 8   # CPU-bound: ~2x typical core count
     llm_max_workers: int = 15  # I/O-bound: limited by API rate limits
+    llm_batch_concurrency: int = 2
 
     # App
     debug: bool = True

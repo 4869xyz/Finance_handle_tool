@@ -1,5 +1,7 @@
 import asyncio
+import logging
 import re
+import time
 from copy import copy
 from datetime import date
 from decimal import Decimal
@@ -49,17 +51,14 @@ from app.services.batch_service import (
     prepare_reprocess,
     register_batch,
 )
-from app.services.exclusion_service import FilterOutcome, filter_documents
+from app.services.exclusion_service import FilterOutcome
+from app.services.audit_classification_service import ensure_audit_classification_results
 from app.services.expense_classification_service import (
     ExpenseClassificationStatus,
     build_expense_summary_groups,
     classification_risk_reason,
-    classify_expenses,
 )
-from app.services.expense_record_service import (
-    RECONCILIATION_VERSION,
-    build_expense_records,
-)
+from app.services.expense_record_service import RECONCILIATION_VERSION, build_expense_records
 from app.services.review_reference_service import (
     MAX_REFERENCE_FILE_SIZE,
     ReviewReferenceValidationError,
@@ -68,6 +67,7 @@ from app.services.review_reference_service import (
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 SOURCE_FOLDER_LABELS = {
@@ -307,6 +307,39 @@ def _configure_export_worksheet(worksheet, *, header_fill_color: str = "1677FF")
         if len(row) >= 28:
             row[27].number_format = "0.0%"
 
+    _apply_table_borders(worksheet)
+
+
+def _apply_table_borders(worksheet) -> None:
+    from openpyxl.styles import Border, Side
+
+    thin_side = Side(style="thin", color="A6A6A6")
+    thin_border = Border(
+        left=thin_side,
+        right=thin_side,
+        top=thin_side,
+        bottom=thin_side,
+    )
+    for row in worksheet.iter_rows(
+        min_row=1,
+        max_row=worksheet.max_row,
+        min_col=1,
+        max_col=worksheet.max_column,
+    ):
+        for cell in row:
+            cell.border = thin_border
+
+
+def _mark_recognition_anomalies(worksheet, documents: list[SourceDocument]) -> None:
+    from openpyxl.styles import PatternFill
+
+    anomaly_fill = PatternFill("solid", fgColor="FCE8E6")
+    for row_number, document in enumerate(documents, start=2):
+        if document.processing_status == ProcessingStatus.RECOGNIZED:
+            continue
+        for cell in worksheet[row_number]:
+            cell.fill = anomaly_fill
+
 
 def _append_filter_row(worksheet, base_row: list, decision):
     worksheet.append(base_row + [
@@ -370,6 +403,8 @@ def _configure_classification_worksheet(worksheet) -> None:
         row[1].number_format = "yyyy-mm-dd"
         row[5].number_format = "#,##0.00"
 
+    _apply_table_borders(worksheet)
+
 
 def _configure_classification_audit_worksheet(worksheet):
     from openpyxl.styles import Alignment, Font, PatternFill
@@ -408,6 +443,8 @@ def _configure_classification_audit_worksheet(worksheet):
         if len(row) >= 21:
             row[20].number_format = "#,##0.00"
 
+    _apply_table_borders(worksheet)
+
 
 def _append_classification_worksheet(
     worksheet,
@@ -438,6 +475,9 @@ def _append_classification_worksheet(
 
     def source_missing_amount(group) -> bool:
         return group.payment_missing_amount if is_payment else group.invoice_missing_amount
+
+    def source_has_amount(group) -> bool:
+        return group.payment_has_amount if is_payment else group.invoice_has_amount
 
     summary_fill = PatternFill("solid", fgColor="E2F0D9")
     missing_fill = PatternFill("solid", fgColor="FCE8E6")
@@ -506,7 +546,7 @@ def _append_classification_worksheet(
             batch.employee_name,
             expense_type,
             expense_detail,
-            None if source_missing_amount(group) else float(source_amount(group)),
+            float(source_amount(group)) if source_has_amount(group) else None,
         ]
         for row_number in range(detail_start, detail_end + 1):
             for column in range(11, 15):
@@ -539,7 +579,7 @@ def _append_classification_worksheet(
             amount_cell.fill = missing_fill
             amount_cell.font = Font(color="C00000", bold=True)
             amount_cell.comment = Comment(
-                "存在金额缺失明细，请查看左侧风险说明。",
+                "存在金额缺失明细；当前合计仅包含已识别金额，请查看左侧风险说明。",
                 "Finance Handle Tool",
             )
 
@@ -858,6 +898,7 @@ async def export_batch_documents_excel(
         worksheet.append(_document_export_row(batch, document, index))
 
     _configure_export_worksheet(worksheet)
+    _mark_recognition_anomalies(worksheet, documents)
 
     output = BytesIO()
     workbook.save(output)
@@ -877,6 +918,7 @@ async def export_filtered_batch_documents_excel(
     batch_id: int,
     db: AsyncSession = Depends(get_db),
 ):
+    started = time.perf_counter()
     batch = await db.get(ProcessingBatch, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="批次不存在")
@@ -896,16 +938,6 @@ async def export_filtered_batch_documents_excel(
         == RECONCILIATION_VERSION
         for document in documents
     )
-    if not reconciliation_current:
-        from app.services.document_reconciliation_service import reconcile_batch
-
-        await reconcile_batch(db, batch_id)
-        result = await db.execute(
-            select(SourceDocument)
-            .where(SourceDocument.batch_id == batch_id)
-            .order_by(SourceDocument.id)
-        )
-        documents = list(result.scalars().all())
     profile_result = await db.execute(
         select(CompanyProfile).order_by(CompanyProfile.version.desc()).limit(1)
     )
@@ -919,20 +951,18 @@ async def export_filtered_batch_documents_excel(
     reference = reference_result.scalar_one_or_none()
 
     records = build_expense_records(documents)
-    decisions = await asyncio.to_thread(
-        filter_documents,
+    audit_classification = await ensure_audit_classification_results(
+        documents,
         records,
         profile,
         reference,
     )
-    decision_by_document = {decision.document_id: decision for decision in decisions}
+    await db.commit()
+    decision_by_document = audit_classification.decisions
     if len(decision_by_document) != len(records):
         raise HTTPException(status_code=500, detail="筛选结果与交易记录数量不一致")
-    classification_by_document = await asyncio.to_thread(
-        classify_expenses,
-        records,
-        reference,
-    )
+    decisions = [decision_by_document[record.id] for record in records]
+    classification_by_document = audit_classification.classifications
     if len(classification_by_document) != len(records):
         raise HTTPException(status_code=500, detail="分类结果与交易记录数量不一致")
     summary_groups = build_expense_summary_groups(
@@ -983,6 +1013,7 @@ async def export_filtered_batch_documents_excel(
             _append_filter_row(exception_sheet, base_row, decision)
 
     _configure_export_worksheet(original_sheet)
+    _mark_recognition_anomalies(original_sheet, documents)
     _configure_export_worksheet(invoice_sheet, header_fill_color="389E0D")
     _configure_export_worksheet(payment_sheet, header_fill_color="389E0D")
     _configure_export_worksheet(exception_sheet, header_fill_color="D46B08")
@@ -1048,8 +1079,28 @@ async def export_filtered_batch_documents_excel(
         raise HTTPException(status_code=500, detail="分类审计明细行数对账失败")
 
     output = BytesIO()
+    excel_started = time.perf_counter()
     workbook.save(output)
     output.seek(0)
+    excel_generation_elapsed_ms = int((time.perf_counter() - excel_started) * 1000)
+    total_elapsed_ms = int((time.perf_counter() - started) * 1000)
+    logger.info(
+        "filtered_export_complete batch_id=%s total_record_count=%s cache_hit_count=%s "
+        "cache_miss_count=%s llm_batch_count=%s llm_request_count=%s retry_count=%s "
+        "reconciliation_pending=%s audit_classification_elapsed_ms=%s "
+        "excel_generation_elapsed_ms=%s total_elapsed_ms=%s",
+        batch_id,
+        audit_classification.metrics.total_records,
+        audit_classification.metrics.cache_hit_count,
+        audit_classification.metrics.cache_miss_count,
+        audit_classification.metrics.llm_batch_count,
+        audit_classification.metrics.llm_request_count,
+        audit_classification.metrics.retry_count,
+        not reconciliation_current,
+        audit_classification.metrics.elapsed_ms,
+        excel_generation_elapsed_ms,
+        total_elapsed_ms,
+    )
     filename = quote(
         _safe_filtered_export_filename(batch.employee_name, batch.expense_month)
     )
