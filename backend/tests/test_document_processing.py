@@ -1,6 +1,7 @@
 import json
 import re
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -17,11 +18,17 @@ from app.services.document_service import (
     TransactionCandidate,
     TransferDetail,
     TripDetail,
+    _clean_invoice_item_name,
     _coerce_classification_payload,
     _coerce_extraction_payload,
+    _ensure_extraction_records,
+    _extract_itinerary_by_rules,
     _map_public_fields,
+    _promote_display_fields,
+    _rule_extraction_acceptable,
     _strict_json,
     classify_document_by_text,
+    extract_fields_by_rules,
     missing_critical_fields,
     process_document_content,
 )
@@ -31,6 +38,14 @@ from app.services.document_prompts import (
     build_document_extraction_prompt,
 )
 
+GAODE_GOLDEN_CASES = json.loads(
+    (
+        Path(__file__).parent
+        / "fixtures"
+        / "gaode_itinerary_golden.json"
+    ).read_text(encoding="utf-8")
+)
+
 
 def extraction_payload(**overrides):
     payload = {
@@ -38,6 +53,7 @@ def extraction_payload(**overrides):
         "counterparty": "测试商户",
         "description": "办公用品",
         "amount": "100.00",
+        "item_name": None,
         "invoice_number": None,
         "transaction_number": "TX123456",
         "provider": None,
@@ -117,8 +133,11 @@ def test_extraction_prompt_v4_covers_supported_types_and_exact_schema():
     )
     assert prompt_fields == expected_fields
     assert f"字段提取 Prompt 版本：{DOCUMENT_EXTRACTION_PROMPT_VERSION}" in prompt
+    assert DOCUMENT_EXTRACTION_PROMPT_VERSION == "4.3"
     assert "不得使用文件名、目录名、批次月份" in prompt
     assert "发票号码，不得填发票代码" in prompt
+    assert "item_name 只取货物或应税劳务名称" in prompt or "item_name 只取" in prompt
+    assert '"item_name"' in prompt
     assert '"currency"' not in prompt
 
 
@@ -197,14 +216,15 @@ def test_type_specific_model_fields_map_to_public_columns(
 
 
 class FakeOcr:
-    def __init__(self, text):
+    def __init__(self, text, layout_items=None):
         self.text = text
+        self.layout_items = layout_items or []
 
     def process_image(self, _data):
-        return self.text, 99.0, []
+        return self.text, 99.0, self.layout_items
 
     def process_document_pdf(self, _data):
-        return self.text, 99.0, []
+        return self.text, 99.0, self.layout_items
 
 
 class FakeProvider:
@@ -235,11 +255,18 @@ class FakeLlm:
         return self._supports_vision
 
 
-def _install_document_services(monkeypatch, *, text, provider, supports_vision=False):
+def _install_document_services(
+    monkeypatch,
+    *,
+    text,
+    provider,
+    supports_vision=False,
+    layout_items=None,
+):
     monkeypatch.setattr(
         document_service,
         "get_ocr_service",
-        lambda: FakeOcr(text),
+        lambda: FakeOcr(text, layout_items),
     )
     monkeypatch.setattr(
         document_service,
@@ -248,7 +275,7 @@ def _install_document_services(monkeypatch, *, text, provider, supports_vision=F
     )
 
 
-def test_image_field_extraction_always_uses_vision_with_ocr_text(monkeypatch):
+def test_payment_image_with_sufficient_ocr_uses_text_llm(monkeypatch):
     text = (
         "微信支付\n支付成功\n支付时间：2025-03-05\n"
         "收款方：测试公司\n支付金额：100.00\n交易单号：TX123456"
@@ -261,7 +288,35 @@ def test_image_field_extraction_always_uses_vision_with_ocr_text(monkeypatch):
         supports_vision=True,
     )
 
-    process_document_content(
+    result = process_document_content(
+        file_data=b"original-image",
+        file_type="jpg",
+        source_folder=SourceFolder.PAYMENT_EVIDENCE,
+    )
+
+    assert len(provider.chat_prompts) == 1
+    assert text in provider.chat_prompts[0]
+    assert not provider.vision_prompts
+    assert result.extracted_fields_json["_validation"]["final_source"] == "LLM_TEXT"
+    assert result.extracted_fields_json["_validation"]["escalation_path"] == "TEXT"
+
+
+def test_payment_image_with_sparse_ocr_uses_vision(monkeypatch):
+    text = "支付"
+    provider = FakeProvider(json.dumps(extraction_payload(), ensure_ascii=False))
+    _install_document_services(
+        monkeypatch,
+        text=text,
+        provider=provider,
+        supports_vision=True,
+    )
+    monkeypatch.setattr(
+        document_service,
+        "classify_document_by_text",
+        lambda _text: (DocumentType.PAYMENT_SCREENSHOT, 1.0),
+    )
+
+    result = process_document_content(
         file_data=b"original-image",
         file_type="jpg",
         source_folder=SourceFolder.PAYMENT_EVIDENCE,
@@ -270,18 +325,32 @@ def test_image_field_extraction_always_uses_vision_with_ocr_text(monkeypatch):
     assert not provider.chat_prompts
     assert len(provider.vision_prompts) == 1
     prompt, image_data, mime_type, options = provider.vision_prompts[0]
-    assert text in prompt
     assert image_data == b"original-image"
     assert mime_type == "image/jpeg"
     assert (
         options["max_output_tokens"]
         == document_service.DOCUMENT_EXTRACTION_MAX_OUTPUT_TOKENS
     )
+    assert result.extracted_fields_json["_validation"]["final_source"] == "LLM_VISION"
+    assert "VISION" in result.extracted_fields_json["_validation"]["escalation_path"]
 
 
-def test_pdf_field_extraction_keeps_text_only_model_call(monkeypatch):
+def test_pdf_incomplete_invoice_escalates_to_text_llm(monkeypatch):
     text = "电子发票\n开票日期：2025-03-05\n价税合计：100.00"
-    provider = FakeProvider(json.dumps(extraction_payload(), ensure_ascii=False))
+    provider = FakeProvider(
+        json.dumps(
+            extraction_payload(
+                seller="销方公司",
+                invoice_number="1234567890",
+                total_with_tax="100.00",
+                payment_amount=None,
+                payee=None,
+                merchant=None,
+                transaction_number=None,
+            ),
+            ensure_ascii=False,
+        )
+    )
     _install_document_services(
         monkeypatch,
         text=text,
@@ -298,6 +367,141 @@ def test_pdf_field_extraction_keeps_text_only_model_call(monkeypatch):
     assert len(provider.chat_prompts) == 1
     assert text in provider.chat_prompts[0]
     assert not provider.vision_prompts
+
+
+def test_complete_invoice_uses_rule_primary_without_llm(monkeypatch):
+    text = (
+        "电子发票\n发票号码：123456789012\n开票日期：2025-03-05\n"
+        "销售方名称：测试销方\n价税合计：¥100.00"
+    )
+    provider = FakeProvider(json.dumps(extraction_payload(), ensure_ascii=False))
+    _install_document_services(
+        monkeypatch,
+        text=text,
+        provider=provider,
+        supports_vision=True,
+    )
+
+    class FakeExtractor:
+        def extract_fields(self, _text, _lines=None):
+            return {
+                "invoice_number": "123456789012",
+                "issue_date": "2025-03-05",
+                "seller_name": "测试销方",
+                "total_with_tax": "100.00",
+                "amount": None,
+                "item_name": "办公用品",
+            }
+
+    monkeypatch.setattr(
+        document_service,
+        "get_field_extractor",
+        lambda: FakeExtractor(),
+    )
+
+    result = process_document_content(
+        file_data=b"pdf-bytes",
+        file_type="pdf",
+        source_folder=SourceFolder.INVOICE,
+    )
+
+    assert provider.calls == 0
+    assert result.processing_status == ProcessingStatus.RECOGNIZED
+    assert result.invoice_number == "123456789012"
+    assert result.counterparty == "测试销方"
+    assert result.amount == Decimal("100.00")
+    validation = result.extracted_fields_json["_validation"]
+    assert validation["final_source"] == "RULE_PRIMARY"
+    assert validation["escalation_path"] == "RULE"
+    assert validation["fallback_used"] is False
+
+
+def test_structured_invoice_rule_failure_upgrades_text_then_vision(monkeypatch):
+    text = "电子发票\n内容不完整"
+    text_payload = extraction_payload(
+        document_date=None,
+        counterparty=None,
+        amount=None,
+        invoice_number=None,
+        transaction_number=None,
+        seller=None,
+        payee=None,
+        merchant=None,
+        total_with_tax=None,
+        payment_amount=None,
+        amount_derivation="NOT_FOUND",
+        amount_evidence=None,
+    )
+    vision_payload = extraction_payload(
+        seller="视觉销方",
+        invoice_number="9988776655",
+        total_with_tax="66.00",
+        amount="66.00",
+        payment_amount=None,
+        payee=None,
+        merchant=None,
+        transaction_number=None,
+    )
+
+    class SequenceProvider:
+        def __init__(self):
+            self.chat_prompts = []
+            self.vision_prompts = []
+            self.calls = 0
+
+        def chat_completion(self, _system, prompt, **_kwargs):
+            self.calls += 1
+            self.chat_prompts.append(prompt)
+            return json.dumps(text_payload, ensure_ascii=False)
+
+        def vision_completion(self, _system, prompt, image_data, mime_type, **kwargs):
+            self.calls += 1
+            self.vision_prompts.append((prompt, image_data, mime_type, kwargs))
+            return json.dumps(vision_payload, ensure_ascii=False)
+
+    provider = SequenceProvider()
+    _install_document_services(
+        monkeypatch,
+        text=text,
+        provider=provider,
+        supports_vision=True,
+    )
+    monkeypatch.setattr(
+        document_service,
+        "classify_document_by_text",
+        lambda _text: (DocumentType.ELECTRONIC_INVOICE, 1.0),
+    )
+
+    class EmptyExtractor:
+        def extract_fields(self, _text, _lines=None):
+            return {
+                "invoice_number": None,
+                "issue_date": None,
+                "seller_name": None,
+                "total_with_tax": None,
+                "amount": None,
+                "item_name": None,
+            }
+
+    monkeypatch.setattr(
+        document_service,
+        "get_field_extractor",
+        lambda: EmptyExtractor(),
+    )
+
+    result = process_document_content(
+        file_data=b"invoice-image",
+        file_type="jpg",
+        source_folder=SourceFolder.INVOICE,
+    )
+
+    assert len(provider.chat_prompts) == 1
+    assert len(provider.vision_prompts) == 1
+    validation = result.extracted_fields_json["_validation"]
+    assert validation["final_source"] == "LLM_VISION"
+    assert validation["escalation_path"] == "RULE→TEXT→VISION"
+    assert result.invoice_number == "9988776655"
+    assert result.counterparty == "视觉销方"
 
 
 def test_valid_llm_result_is_used_without_running_rule_extraction(monkeypatch):
@@ -335,7 +539,7 @@ def test_valid_llm_result_is_used_without_running_rule_extraction(monkeypatch):
     assert result.counterparty == "LLM商户"
     assert result.amount == Decimal("88.00")
     assert result.transaction_number == "LLM-TX001"
-    assert validation["final_source"] == "LLM"
+    assert validation["final_source"] == "LLM_TEXT"
     assert validation["fallback_used"] is False
     assert "rule_fields" not in validation
     assert "matched_fields" not in validation
@@ -376,7 +580,7 @@ def test_partial_llm_result_keeps_null_fields_without_rule_fill(monkeypatch):
     assert result.transaction_number is None
     assert result.processing_status == ProcessingStatus.NEEDS_MANUAL_REVIEW
     assert result.status_reason == "MISSING_CRITICAL_FIELDS"
-    assert validation["final_source"] == "LLM"
+    assert validation["final_source"] == "LLM_TEXT"
     assert validation["fallback_used"] is False
 
 
@@ -428,6 +632,7 @@ def test_llm_with_all_key_fields_empty_uses_whole_document_rule_fallback(monkeyp
     assert validation["final_source"] == "OCR_RULE_FALLBACK"
     assert validation["fallback_used"] is True
     assert validation["fallback_reason"] == "NO_USABLE_LLM_FIELDS"
+    assert "RULE_FALLBACK" in validation["escalation_path"]
 
 
 def test_low_confidence_llm_result_does_not_switch_to_rule_fallback(monkeypatch):
@@ -461,7 +666,7 @@ def test_low_confidence_llm_result_does_not_switch_to_rule_fallback(monkeypatch)
 
     assert result.counterparty == "LLM商户"
     assert result.status_reason == "LOW_EXTRACTION_CONFIDENCE"
-    assert result.extracted_fields_json["_validation"]["final_source"] == "LLM"
+    assert result.extracted_fields_json["_validation"]["final_source"] == "LLM_TEXT"
     assert result.extracted_fields_json["_validation"]["fallback_used"] is False
 
 
@@ -778,3 +983,415 @@ def test_llm_api_exception_detail_is_preserved_for_classification(monkeypatch):
     assert result.status_reason == "LLM_UNAVAILABLE"
     assert "RuntimeError" in (result.status_detail or "")
     assert "model_not_found" in (result.status_detail or "")
+
+
+def test_promote_display_fields_joins_invoice_items_and_trip_details():
+    extraction = ExtractionModel.model_validate(
+        extraction_payload(
+            item_name=None,
+            payment_amount=None,
+            amount="88.00",
+            total_with_tax="88.00",
+            records=[
+                {
+                    "record_id": "R1",
+                    "record_type": "INVOICE",
+                    "document_date": "2025-03-05",
+                    "counterparty": "测试商户",
+                    "description": "办公用品",
+                    "invoice_number": "INV001",
+                    "order_number": None,
+                    "transaction_number": None,
+                    "primary_amount": {
+                        "value": "50.00",
+                        "evidence": "价税合计50.00",
+                        "kind": "TOTAL_WITH_TAX",
+                    },
+                    "items": [
+                        {
+                            "name_visible": "打印纸",
+                            "name_complete": True,
+                            "item_amount": {
+                                "value": "30.00",
+                                "evidence": "30.00",
+                                "kind": "ITEM",
+                            },
+                        },
+                        {
+                            "name_visible": "签字笔",
+                            "name_complete": True,
+                            "item_amount": {
+                                "value": "20.00",
+                                "evidence": "20.00",
+                                "kind": "ITEM",
+                            },
+                        },
+                    ],
+                    "manual_review": False,
+                    "review_reasons": [],
+                    "confidence": 0.9,
+                },
+                {
+                    "record_id": "R2",
+                    "record_type": "TRIP",
+                    "document_date": "2025-03-06",
+                    "counterparty": "滴滴",
+                    "description": "打车",
+                    "invoice_number": None,
+                    "order_number": None,
+                    "transaction_number": None,
+                    "primary_amount": {
+                        "value": "38.00",
+                        "evidence": "车费38.00",
+                        "kind": "TRIP_TOTAL",
+                    },
+                    "trip": {
+                        "request_time": "申请 09:00",
+                        "start_time": "09:10",
+                        "end_time": "09:40",
+                        "origin": "公司门口",
+                        "destination": "火车站",
+                        "stated_total": {
+                            "value": "38.00",
+                            "evidence": "合计38.00",
+                            "kind": "TRIP_TOTAL",
+                        },
+                        "detail_amounts": [],
+                    },
+                    "manual_review": False,
+                    "review_reasons": [],
+                    "confidence": 0.9,
+                },
+            ],
+        )
+    )
+    display = _promote_display_fields(extraction)
+    assert display["item_name"] == "打印纸; 签字笔"
+    assert display["trip_origin"] == "公司门口"
+    assert display["trip_destination"] == "火车站"
+    assert display["trip_time_text"] == "09:10至09:40"
+
+
+def test_payment_public_fields_keep_transaction_and_order_separate():
+    extraction = ExtractionModel.model_validate(
+        extraction_payload(
+            order_number="ORD-9988",
+            transaction_number="TX-123456",
+            payment_amount="100.00",
+            amount="100.00",
+            records=[],
+        )
+    )
+    _ensure_extraction_records(DocumentType.PAYMENT_SCREENSHOT, extraction)
+    assert extraction.records[0].order_number == "ORD-9988"
+    assert extraction.records[0].transaction_number == "TX-123456"
+    mapped = _map_public_fields(DocumentType.PAYMENT_SCREENSHOT, extraction)
+    assert mapped["transaction_number"] == "TX-123456"
+    assert mapped["order_number"] == "ORD-9988"
+    assert mapped["item_name"] is None
+
+
+def test_clean_invoice_item_name_strips_rate_and_qty_debris():
+    assert (
+        _clean_invoice_item_name(
+            "运输服务*客运服务费 21.2621359223301 1 21.26 3% 0.64"
+        )
+        == "运输服务*客运服务费"
+    )
+    assert _clean_invoice_item_name("*电信服务*服务费次 1 60.377 6% 3.62") in {
+        "电信服务*服务费次",
+        "*电信服务*服务费次",
+    }
+
+
+def test_gaode_itinerary_rules_extract_od_time_not_header_as_party():
+    text = (
+        "高德地图—打车——行程单\n"
+        "车型 上车时间 城市 起点 终点 金额\n"
+        "2025-04-15 08:30 经济型 深圳 科技园地铁站 机场T3航站楼 21.90\n"
+        "行程费用合计：21.90\n"
+        "曹操出行"
+    )
+    extraction = _extract_itinerary_by_rules(text, 99.0)
+    mapped = _map_public_fields(DocumentType.ITINERARY, extraction)
+    assert extraction.counterparty == "曹操出行"
+    assert "车型" not in (extraction.counterparty or "")
+    assert mapped["trip_origin"] == "科技园地铁站"
+    assert mapped["trip_destination"] == "机场T3航站楼"
+    assert mapped["trip_time_text"] == "08:30"
+    assert mapped["amount"] == Decimal("21.90")
+    assert _rule_extraction_acceptable(
+        DocumentType.ITINERARY,
+        extraction,
+        mapped,
+        0.75,
+    )
+
+
+def test_gaode_title_fragments_are_not_trip_locations():
+    text = (
+        "高德地图—打车——行程单\n"
+        "AMAP ITINERARY\n"
+        "申请时间：2025-05-20 行程时间：2025-04-17 18:55至2025-04-17 19:30\n"
+        "共计1单行程，合计21.90元\n"
+        "序号 服务商 车型 上车时间 城市 起点 终点 金额\n"
+    )
+    extraction = _extract_itinerary_by_rules(text, 99.0)
+    mapped = _map_public_fields(DocumentType.ITINERARY, extraction)
+    assert mapped["trip_origin"] is None or "高德" not in mapped["trip_origin"]
+    assert mapped["trip_destination"] != "行程单"
+    assert not _rule_extraction_acceptable(
+        DocumentType.ITINERARY,
+        extraction,
+        mapped,
+        0.75,
+    )
+
+
+def test_gaode_text_fallback_without_layout_keeps_single_line_od():
+    text = (
+        "高德地图—打车——行程单\n"
+        "共计1单行程，合计21.90元\n"
+        "序号 服务商 车型 上车时间 城市 起点 终点 金额\n"
+        "1 曹操出行 经济型 2025-04-15 08:30 深圳 科技园地铁站 机场T3航站楼 21.90元\n"
+    )
+    extraction = _extract_itinerary_by_rules(text, 99.0, layout_items=None)
+    mapped = _map_public_fields(DocumentType.ITINERARY, extraction)
+    assert mapped["trip_origin"] == "科技园地铁站"
+    assert mapped["trip_destination"] == "机场T3航站楼"
+    assert mapped["trip_time_text"] == "2025-04-15 08:30"
+    assert mapped["amount"] == Decimal("21.90")
+    assert _rule_extraction_acceptable(
+        DocumentType.ITINERARY,
+        extraction,
+        mapped,
+        0.75,
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    GAODE_GOLDEN_CASES,
+    ids=[case["case_id"] for case in GAODE_GOLDEN_CASES],
+)
+def test_gaode_layout_golden_cases_use_rule_primary_without_llm(
+    monkeypatch,
+    case,
+):
+    provider = FakeProvider("{}")
+    _install_document_services(
+        monkeypatch,
+        text=case["text"],
+        provider=provider,
+        supports_vision=False,
+        layout_items=case["layout_items"],
+    )
+
+    result = process_document_content(
+        file_data=b"native-pdf",
+        file_type="pdf",
+        source_folder=SourceFolder.PAYMENT_EVIDENCE,
+        file_name=case["file_name"],
+    )
+
+    expected = case["expected"]
+    assert result.processing_status == ProcessingStatus.RECOGNIZED
+    assert result.counterparty == expected["provider"]
+    assert result.amount == Decimal(expected["amount"])
+    assert result.trip_origin == expected["trip_origin"]
+    assert result.trip_destination == expected["trip_destination"]
+    assert result.trip_time_text == expected["trip_time_text"]
+    assert result.extracted_fields_json["_validation"]["final_source"] == "RULE_PRIMARY"
+    assert result.extracted_fields_json["_validation"]["escalation_path"] == "RULE"
+    assert provider.calls == 0
+
+    records = result.extracted_fields_json["records"]
+    assert [record["trip"]["origin"] for record in records] == expected["origins"]
+    assert [
+        record["trip"]["destination"] for record in records
+    ] == expected["destinations"]
+    assert [
+        record["trip"]["start_time"] for record in records
+    ] == expected["start_times"]
+    assert records[-1]["trip"]["end_time"] == expected["end_time"]
+
+
+def test_gaode_layout_record_count_mismatch_is_not_rule_primary():
+    case = GAODE_GOLDEN_CASES[0]
+    text = re.sub(r"共计1单行程", "共计2单行程", case["text"])
+    extraction = _extract_itinerary_by_rules(
+        text,
+        99.0,
+        case["layout_items"],
+    )
+    mapped = _map_public_fields(DocumentType.ITINERARY, extraction)
+
+    assert extraction.records[0].manual_review
+    assert "GAODE_RECORD_COUNT_MISMATCH" in extraction.records[0].review_reasons
+    assert not _rule_extraction_acceptable(
+        DocumentType.ITINERARY,
+        extraction,
+        mapped,
+        0.75,
+    )
+
+
+def test_itinerary_without_od_is_not_rule_primary_acceptable():
+    text = (
+        "高德地图—打车——行程单\n"
+        "车型 上车时间 城市 起点 终点 金额\n"
+        "行程费用合计：21.90\n"
+    )
+    extraction = _extract_itinerary_by_rules(text, 99.0)
+    _ensure_extraction_records(DocumentType.ITINERARY, extraction)
+    mapped = _map_public_fields(DocumentType.ITINERARY, extraction)
+    assert not _rule_extraction_acceptable(
+        DocumentType.ITINERARY,
+        extraction,
+        mapped,
+        0.75,
+    )
+
+
+def test_itinerary_missing_od_escalates_to_text_llm(monkeypatch):
+    text = (
+        "高德地图—打车——行程单\n"
+        "车型 上车时间 城市 起点 终点 金额\n"
+        "行程费用合计：21.90\n"
+    )
+    payload = extraction_payload(
+        provider="曹操出行",
+        counterparty="曹操出行",
+        trip_amount="21.90",
+        amount="21.90",
+        payment_amount=None,
+        payee=None,
+        merchant=None,
+        transaction_number=None,
+        records=[
+            {
+                "record_id": "R1",
+                "record_type": "TRIP",
+                "document_date": "2025-04-15",
+                "counterparty": "曹操出行",
+                "description": "打车",
+                "invoice_number": None,
+                "order_number": None,
+                "transaction_number": None,
+                "primary_amount": {
+                    "value": "21.90",
+                    "evidence": "行程费用合计",
+                    "kind": "TRIP_TOTAL",
+                },
+                "item_subtotal": {"value": None, "evidence": None, "kind": "UNKNOWN"},
+                "original_amount": {"value": None, "evidence": None, "kind": "UNKNOWN"},
+                "discount_amount": {"value": None, "evidence": None, "kind": "UNKNOWN"},
+                "items": [],
+                "trip": {
+                    "request_time": None,
+                    "start_time": "08:30",
+                    "end_time": None,
+                    "service_provider": "曹操出行",
+                    "vehicle_type": None,
+                    "city": "深圳",
+                    "origin": "科技园",
+                    "destination": "机场",
+                    "stated_total": {
+                        "value": "21.90",
+                        "evidence": "行程费用合计",
+                        "kind": "TRIP_TOTAL",
+                    },
+                    "detail_amounts": [],
+                },
+                "transfer": None,
+                "manual_review": False,
+                "review_reasons": [],
+                "confidence": 0.9,
+            }
+        ],
+    )
+    provider = FakeProvider(json.dumps(payload, ensure_ascii=False))
+    _install_document_services(
+        monkeypatch,
+        text=text,
+        provider=provider,
+        supports_vision=False,
+    )
+    monkeypatch.setattr(
+        document_service,
+        "classify_document_by_text",
+        lambda _text: (DocumentType.ITINERARY, 1.0),
+    )
+
+    result = process_document_content(
+        file_data=b"pdf-bytes",
+        file_type="pdf",
+        source_folder=SourceFolder.PAYMENT_EVIDENCE,
+    )
+
+    validation = result.extracted_fields_json["_validation"]
+    assert validation["final_source"] == "LLM_TEXT"
+    assert "TEXT" in validation["escalation_path"]
+    assert validation["final_source"] != "RULE_PRIMARY"
+    assert result.trip_origin == "科技园"
+    assert result.trip_destination == "机场"
+    assert len(provider.chat_prompts) == 1
+
+
+def test_invoice_rules_clean_item_name_into_display_field(monkeypatch):
+    text = (
+        "电子发票\n发票号码：25442000000290843167\n开票日期：2025-04-15\n"
+        "销售方名称：测试销方\n"
+        "*运输服务*客运服务费 21.2621359223301 1 21.26 3% 0.64\n"
+        "价税合计：¥21.90"
+    )
+    provider = FakeProvider(json.dumps(extraction_payload(), ensure_ascii=False))
+    _install_document_services(
+        monkeypatch,
+        text=text,
+        provider=provider,
+        supports_vision=True,
+    )
+
+    class FakeExtractor:
+        def extract_fields(self, _text, _lines=None):
+            return {
+                "invoice_number": "25442000000290843167",
+                "issue_date": "2025-04-15",
+                "seller_name": "测试销方",
+                "total_with_tax": "21.90",
+                "amount": None,
+                "item_name": "运输服务*客运服务费 21.2621359223301 1 21.26 3% 0.64",
+            }
+
+    monkeypatch.setattr(
+        document_service,
+        "get_field_extractor",
+        lambda: FakeExtractor(),
+    )
+
+    result = process_document_content(
+        file_data=b"pdf-bytes",
+        file_type="pdf",
+        source_folder=SourceFolder.INVOICE,
+    )
+
+    assert provider.calls == 0
+    assert result.invoice_number == "25442000000290843167"
+    assert result.amount == Decimal("21.90")
+    assert result.item_name == "运输服务*客运服务费"
+    assert "3%" not in (result.item_name or "")
+    assert result.extracted_fields_json["_validation"]["final_source"] == "RULE_PRIMARY"
+
+
+def test_payment_rules_split_order_and_transaction_numbers():
+    text = (
+        "微信支付\n支付成功\n支付时间：2025-03-05\n"
+        "收款方：农家小炒\n支付金额：102.00\n"
+        "交易单号：10001073012025041500336997573149\n"
+        "商家订单号：ORDER20250415001"
+    )
+    extraction = extract_fields_by_rules(text, 99.0)
+    assert extraction.transaction_number == "10001073012025041500336997573149"
+    assert extraction.order_number == "ORDER20250415001"
+    assert extraction.transaction_number != extraction.order_number

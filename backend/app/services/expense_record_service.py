@@ -62,6 +62,10 @@ class ExpenseRecordView:
     invoice_number: str | None
     transaction_number: str | None
     order_number: str | None
+    item_name: str | None
+    trip_origin: str | None
+    trip_destination: str | None
+    trip_time_text: str | None
     record_type: str
     amount_evidence: str | None
     transfer_direction: str | None
@@ -179,7 +183,11 @@ def build_expense_records(
                     currency=document.currency,
                     invoice_number=record.get("invoice_number") or None,
                     transaction_number=transaction_number,
-                    order_number=order_number,
+                    order_number=order_number or document.order_number,
+                    item_name=document.item_name,
+                    trip_origin=document.trip_origin,
+                    trip_destination=document.trip_destination,
+                    trip_time_text=document.trip_time_text,
                     record_type=str(record.get("record_type") or "OTHER"),
                     amount_evidence=amount_payload.get("evidence") or None,
                     transfer_direction=transfer.get("direction") or None,

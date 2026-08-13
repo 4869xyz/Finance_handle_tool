@@ -276,21 +276,24 @@ async def test_batch_excel_export_includes_all_documents_and_typed_values():
             workbook = load_workbook(BytesIO(response.content), data_only=True)
             worksheet = workbook['识别结果']
             assert worksheet.max_row == 3
-            assert worksheet.max_column == 21
+            assert worksheet.max_column == 26
             assert worksheet.freeze_panes == 'A2'
-            assert worksheet.auto_filter.ref == 'A1:U3'
+            assert worksheet.auto_filter.ref == 'A1:Z3'
             assert [cell.value for cell in worksheet[1]][:5] == [
                 '序号', '员工姓名', '报销月份', '批次号', '来源'
             ]
             assert "币种" not in [cell.value for cell in worksheet[1]]
-            assert worksheet['P1'].value == '发票号码'
+            assert worksheet['P1'].value == '项目名称'
+            assert worksheet['Q1'].value == '发票号码'
+            assert worksheet['S1'].value == '订单号'
+            assert worksheet['T1'].value == '行程起点'
             assert worksheet['I2'].value == '已识别'
             assert worksheet['L2'].value == datetime(2025, 7, 5)
             assert worksheet['O2'].value == 19.5
             assert worksheet['O2'].number_format == '#,##0.00'
-            assert worksheet['R2'].value == 0.95
-            assert worksheet['R2'].number_format == '0.0%'
-            assert worksheet['S2'].value == 0.91
+            assert worksheet['W2'].value == 0.95
+            assert worksheet['W2'].number_format == '0.0%'
+            assert worksheet['X2'].value == 0.91
             assert worksheet['I3'].value == '已跳过'
             assert worksheet['J3'].value == '重复汇总PDF，已跳过'
             assert worksheet['A2'].fill.fgColor.rgb.endswith('1677FF') is False
@@ -302,10 +305,10 @@ async def test_batch_excel_export_includes_all_documents_and_typed_values():
                     worksheet['A1'].border.right,
                     worksheet['A1'].border.top,
                     worksheet['A1'].border.bottom,
-                    worksheet['U3'].border.left,
-                    worksheet['U3'].border.right,
-                    worksheet['U3'].border.top,
-                    worksheet['U3'].border.bottom,
+                    worksheet['Z3'].border.left,
+                    worksheet['Z3'].border.right,
+                    worksheet['Z3'].border.top,
+                    worksheet['Z3'].border.bottom,
                 )
             )
 
@@ -528,17 +531,17 @@ async def test_filtered_batch_export_has_auditable_seven_sheet_reconciliation(mo
             payment_classification = workbook["支付凭证_分类汇总"]
             classification_audit = workbook["分类审计明细"]
             assert original.max_row == 6
-            assert original.max_column == 21
+            assert original.max_column == 26
             assert invoice.max_row == 4
             assert payment.max_row == 3
             assert exception.max_row == 3
-            assert invoice.max_column == payment.max_column == exception.max_column == 32
+            assert invoice.max_column == payment.max_column == exception.max_column == 37
             assert "币种" not in [cell.value for cell in original[1]]
             assert "币种" not in [cell.value for cell in invoice[1]]
-            assert invoice["V1"].value == "筛选结论"
-            assert invoice["AE1"].value == "辅助表版本"
-            assert invoice["AF1"].value == "辅助匹配依据"
-            assert invoice["V2"].value == "保留"
+            assert invoice["AA1"].value == "筛选结论"
+            assert invoice["AJ1"].value == "辅助表版本"
+            assert invoice["AK1"].value == "辅助匹配依据"
+            assert invoice["AA2"].value == "保留"
             assert invoice["A2"].font.color.type != "rgb"
             assert original["A4"].font.color.type != "rgb"
             assert original["A2"].fill.fgColor.rgb.endswith("FCE8E6") is False
@@ -547,21 +550,21 @@ async def test_filtered_batch_export_has_auditable_seven_sheet_reconciliation(mo
             assert original["A5"].fill.fgColor.rgb.endswith("FCE8E6")
             assert original["A6"].fill.fgColor.rgb.endswith("FCE8E6") is False
             assert invoice["F3"].value == "PDF合并.pdf"
-            assert invoice["V3"].value == "排除"
+            assert invoice["AA3"].value == "排除"
             assert all(
                 cell.font.color.type == "rgb"
                 and cell.font.color.rgb.endswith("C00000")
                 for cell in invoice[3]
             )
             assert payment["F3"].value == "d.jpg"
-            assert payment["V3"].value == "待复核"
+            assert payment["AA3"].value == "待复核"
             assert all(
                 cell.font.color.type == "rgb"
                 and cell.font.color.rgb.endswith("C00000")
                 for cell in payment[3]
             )
-            assert exception["V2"].value == "排除"
-            assert exception["V3"].value == "待复核"
+            assert exception["AA2"].value == "排除"
+            assert exception["AA3"].value == "待复核"
             assert exception["A2"].fill.fgColor.rgb.endswith("FCE8E6")
             assert exception["A3"].fill.fgColor.rgb.endswith("FFF4CC")
             assert original.max_row - 1 == (

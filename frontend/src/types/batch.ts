@@ -73,9 +73,14 @@ export interface SourceDocument {
   document_date: string | null;
   counterparty: string | null;
   description: string | null;
-  amount: string | null;
+    amount: string | null;
   invoice_number: string | null;
   transaction_number: string | null;
+  item_name: string | null;
+  order_number: string | null;
+  trip_origin: string | null;
+  trip_destination: string | null;
+  trip_time_text: string | null;
   extracted_fields_json: Record<string, unknown> | null;
   classification_raw_response: string | null;
   extraction_raw_response: string | null;

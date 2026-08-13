@@ -64,6 +64,11 @@ class SourceDocumentResponse(BaseModel):
     amount: Decimal | None = None
     invoice_number: str | None = None
     transaction_number: str | None = None
+    item_name: str | None = None
+    order_number: str | None = None
+    trip_origin: str | None = None
+    trip_destination: str | None = None
+    trip_time_text: str | None = None
     extracted_fields_json: dict[str, Any] | None = None
     classification_raw_response: str | None = None
     extraction_raw_response: str | None = None

@@ -516,6 +516,11 @@ async def prepare_reprocess(
         document.currency = None
         document.invoice_number = None
         document.transaction_number = None
+        document.item_name = None
+        document.order_number = None
+        document.trip_origin = None
+        document.trip_destination = None
+        document.trip_time_text = None
         document.extracted_fields_json = None
         document.classification_raw_response = None
         document.extraction_raw_response = None

@@ -4,6 +4,7 @@ import {
   CheckCircleOutlined,
   ExclamationCircleOutlined,
 } from '@ant-design/icons';
+import logoChaoyuanli from '../../../assets/logo-chaoyuanli.png';
 import styles from './Sidebar.module.css';
 
 interface NavItem {
@@ -32,7 +33,11 @@ export default function Sidebar({ llmConfigured, onOpenLLMConfig }: SidebarProps
       <div className={styles.sidebarTop}>
         {/* Logo */}
         <div className={styles.logo}>
-          <div className={styles.logoMark} />
+          <img
+            className={styles.logoMark}
+            src={logoChaoyuanli}
+            alt="超元力"
+          />
           <span className={styles.logoText}>发票管理</span>
         </div>
 

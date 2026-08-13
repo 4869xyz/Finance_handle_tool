@@ -135,8 +135,13 @@ EXPORT_HEADERS = [
     "对方",
     "摘要",
     "金额",
+    "项目名称",
     "发票号码",
     "交易/订单号",
+    "订单号",
+    "行程起点",
+    "行程终点",
+    "行程时间",
     "类型置信度",
     "提取置信度",
     "处理次数",
@@ -240,8 +245,13 @@ def _document_export_row(batch: ProcessingBatch, document: SourceDocument, index
         document.counterparty or "",
         document.description or "",
         float(document.amount) if document.amount is not None else None,
+        document.item_name or "",
         document.invoice_number or "",
         document.transaction_number or "",
+        document.order_number or "",
+        document.trip_origin or "",
+        document.trip_destination or "",
+        document.trip_time_text or "",
         (
             float(document.classification_confidence)
             if document.classification_confidence is not None
@@ -296,16 +306,19 @@ def _configure_export_worksheet(worksheet, *, header_fill_color: str = "1677FF")
     for row in worksheet.iter_rows(min_row=2):
         for cell in row:
             cell.alignment = Alignment(vertical="top")
-        for column_index in (6, 9, 10, 13, 23, 24, 31):
+        for column_index in (6, 9, 10, 13, 15, 19, 20, 21, 28, 29, 36):
             if column_index < len(row):
                 row[column_index].alignment = Alignment(vertical="top", wrap_text=True)
         row[11].number_format = "yyyy-mm-dd"
         row[14].number_format = "#,##0.00"
-        row[17].number_format = "0.0%"
-        row[18].number_format = "0.0%"
-        row[20].number_format = "yyyy-mm-dd hh:mm:ss"
-        if len(row) >= 28:
-            row[27].number_format = "0.0%"
+        if len(row) > 22:
+            row[22].number_format = "0.0%"
+        if len(row) > 23:
+            row[23].number_format = "0.0%"
+        if len(row) > 25:
+            row[25].number_format = "yyyy-mm-dd hh:mm:ss"
+        if len(row) >= 33:
+            row[32].number_format = "0.0%"
 
     _apply_table_borders(worksheet)
 

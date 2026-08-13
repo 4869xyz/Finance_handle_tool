@@ -160,6 +160,11 @@ class SourceDocument(Base):
     currency = Column(String(10), nullable=True)
     invoice_number = Column(String(100), nullable=True)
     transaction_number = Column(String(150), nullable=True)
+    item_name = Column(String(1000), nullable=True)
+    order_number = Column(String(150), nullable=True)
+    trip_origin = Column(String(1000), nullable=True)
+    trip_destination = Column(String(1000), nullable=True)
+    trip_time_text = Column(String(1000), nullable=True)
 
     extracted_fields_json = Column(JSON, nullable=True)
     classification_raw_response = Column(Text, nullable=True)

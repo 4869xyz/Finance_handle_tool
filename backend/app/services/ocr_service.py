@@ -178,31 +178,55 @@ class OCRService:
             logger.warning(f"PDF text layer extraction failed: {e}")
             return "", False
 
-    def extract_document_pdf_text(self, pdf_data: bytes) -> tuple[str, bool]:
-        """Extract every PDF page without invoice-specific usefulness checks."""
+    def extract_document_pdf_text(
+        self,
+        pdf_data: bytes,
+    ) -> tuple[str, bool, List[Dict[str, Any]]]:
+        """Extract every PDF page and preserve native word coordinates."""
         try:
             import pdfplumber
 
             all_text: list[str] = []
+            layout_items: List[Dict[str, Any]] = []
             with pdfplumber.open(BytesIO(pdf_data)) as pdf:
-                for page in pdf.pages:
+                for page_number, page in enumerate(pdf.pages, start=1):
                     text = page.extract_text()
                     if text and text.strip():
                         all_text.append(text.strip())
+                    for word in page.extract_words(
+                        use_text_flow=False,
+                        keep_blank_chars=False,
+                    ):
+                        min_x = float(word["x0"])
+                        max_x = float(word["x1"])
+                        min_y = float(word["top"])
+                        max_y = float(word["bottom"])
+                        layout_items.append(
+                            {
+                                "page": page_number,
+                                "text": str(word["text"]),
+                                "min_x": min_x,
+                                "max_x": max_x,
+                                "min_y": min_y,
+                                "max_y": max_y,
+                                "center_x": (min_x + max_x) / 2,
+                                "center_y": (min_y + max_y) / 2,
+                            }
+                        )
             combined_text = "\n".join(all_text)
-            return combined_text, bool(combined_text.strip())
+            return combined_text, bool(combined_text.strip()), layout_items
         except Exception as exc:
             logger.warning("Generic PDF text layer extraction failed: %s", exc)
-            return "", False
+            return "", False, []
 
     def process_document_pdf(
         self,
         pdf_data: bytes,
     ) -> Tuple[str, float, List[Dict[str, Any]]]:
         """Process a generic PDF for the monthly document workflow."""
-        text_layer, has_text = self.extract_document_pdf_text(pdf_data)
+        text_layer, has_text, layout_items = self.extract_document_pdf_text(pdf_data)
         if has_text:
-            return text_layer, 99.0, []
+            return text_layer, 99.0, layout_items
         return self.process_pdf(pdf_data)
 
     def process_pdf(self, pdf_data: bytes) -> Tuple[str, float, List[Dict[str, Any]]]:

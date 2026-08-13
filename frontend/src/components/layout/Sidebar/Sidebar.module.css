@@ -29,10 +29,12 @@
 }
 
 .logoMark {
-  width: 28px;
-  height: 28px;
-  background-color: var(--red-primary);
+  width: 36px;
+  height: 36px;
   border-radius: var(--radius-base);
+  object-fit: cover;
+  display: block;
+  flex-shrink: 0;
 }
 
 .logoText {
@@ -154,8 +156,8 @@
   }
 
   .logoMark {
-    width: 24px;
-    height: 24px;
+    width: 32px;
+    height: 32px;
   }
 
   .logoText {

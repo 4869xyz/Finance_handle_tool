@@ -1,3 +1,4 @@
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 
@@ -14,6 +15,26 @@ async_session_maker = async_sessionmaker(
 
 class Base(DeclarativeBase):
     pass
+
+
+SOURCE_DOCUMENT_DISPLAY_COLUMNS = (
+    ("item_name", "VARCHAR(1000)"),
+    ("order_number", "VARCHAR(150)"),
+    ("trip_origin", "VARCHAR(1000)"),
+    ("trip_destination", "VARCHAR(1000)"),
+    ("trip_time_text", "VARCHAR(1000)"),
+)
+
+
+async def ensure_source_document_display_columns(connection) -> None:
+    """Add nullable display columns on existing Postgres databases."""
+    for column_name, column_type in SOURCE_DOCUMENT_DISPLAY_COLUMNS:
+        await connection.execute(
+            text(
+                f"ALTER TABLE source_documents "
+                f"ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
+            )
+        )
 
 
 async def get_db():

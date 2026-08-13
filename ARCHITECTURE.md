@@ -148,12 +148,17 @@ Models + Database (PostgreSQL)
        视频 → 人工复核且 file_data=NULL
        PDF合并.pdf → 跳过
        超 5000 万像素图片 → 人工复核且不解码/OCR/LLM
-  → 其余文档由全局并发 2 的后台协调器领取
-  → PDF 全页文本层或 PaddleOCR
+  → 其余文档由 OCR worker 串行领取（配置项 `batch_processing_concurrency` 尚未接入 worker）
+  → PDF 全页文本层（保留 pdfplumber 文字坐标）或 PaddleOCR
   → 正文确定性分类；歧义时调用已配置 LLM
-  → LLM 按类型 Prompt 主提取；图片同时输入原图和 OCR 文字
-  → LLM 调用/响应无效或全部关键字段为空时，整单使用 OCR/Python 规则兜底
-  → Prompt 4.0 严格 JSON Schema 拆分独立订单、行程和转账，Decimal 验算文件内金额
+  → 按类型分流提取：
+       标准发票/出租车票/行程车票 → 本地规则（发票复用 FieldExtractor）优先；关键字段齐全且达阈值则 `RULE_PRIMARY`
+       高德行程单 → PDF 坐标表格优先恢复跨行起终点；文本规则次之；再升 LLM
+       行程单 RULE_PRIMARY 要求每条 TRIP 均有可用起终点与开始时间，且记录数与“共计 N 单”一致；否则升文本 LLM
+       支付/订单截图及杂类 → OCR 文本充足时仅文本 LLM；OCR 稀疏或仍缺关键字段时升级 vision
+       LLM 不可用/无效或全部关键字段为空时，整单回退 OCR/Python 规则（`OCR_RULE_FALLBACK`）
+  → `_validation.final_source` 区分 `RULE_PRIMARY` / `LLM_TEXT` / `LLM_VISION` / `OCR_RULE_FALLBACK`，并记录 `escalation_path`
+  → Prompt 4.3 严格 JSON Schema 仍用于 LLM 路径；规则路径清洗发票 `item_name`、分离支付订单号/交易单号；多行程展示字段按段用 `/` 有序拼接
   → RECOGNIZED / NEEDS_MANUAL_REVIEW / FAILED
   → 批次无活动文档后 COMPLETED
   → Python 生成跨文件重复候选，核对 LLM 判断关系并选择主凭证
@@ -204,12 +209,12 @@ LLM 密钥/模型：backend/.env + /api/settings
 - **批次视频**：仅存路径、大小、哈希和人工复核原因，`source_documents.file_data` 为空
 - **其他批次文件**：原始字节存 `source_documents.file_data`；哈希仅审计，不自动去重
 - **导出 CSV/Excel**：内存生成后直接下载，不落盘归档
-- **交易、核对与审核分类事实**：单文件交易保存在 `source_documents.extracted_fields_json.records`；批次主辅关系、主凭证引用、置信度、证据和去重计入金额保存在同一 JSON 的 `_reconciliation`。审核筛选和费用分类结果按交易记录缓存到 `_audit_classification.records`，以源记录哈希、Prompt/策略、公司档案、辅助表和模型配置共同失效；均不新增表或列。
-- **审核及分类汇总**：普通导出优先读取审核分类缓存，只对失效的已识别记录以受限并发调用统一模型服务，不自动补跑跨文件核对；核对缺失时分类审计明细标记“未核对”。工作簿保持 7 张表；“识别结果”一文件一行，非 `RECOGNIZED` 行使用浅红底，剔除、两张分类表和分类审计按交易记录一笔一行。分类表按费用组连续排列 A:J 明细，K:N 的申请人、费用类型、详细事项和识别金额合计纵向合并；7 张表的实际使用区域使用细灰边框
+- **交易、核对与审核分类事实**：单文件交易保存在 `source_documents.extracted_fields_json.records`；文件级展示字段 `item_name`、`order_number`、`trip_origin`、`trip_destination`、`trip_time_text` 同时写入表列与 JSON（多值以 `; ` 拼接）；批次主辅关系、主凭证引用、置信度、证据和去重计入金额保存在同一 JSON 的 `_reconciliation`。审核筛选和费用分类结果按交易记录缓存到 `_audit_classification.records`，以源记录哈希、Prompt/策略、公司档案、辅助表和模型配置共同失效。
+- **审核及分类汇总**：普通导出优先读取审核分类缓存，只对失效的已识别记录以受限并发调用统一模型服务，不自动补跑跨文件核对；核对缺失时分类审计明细标记“未核对”。工作簿保持 7 张表；“识别结果”一文件一行（含项目名称、订单号、行程起终点与时间列），非 `RECOGNIZED` 行使用浅红底，剔除、两张分类表和分类审计按交易记录一笔一行。分类表按费用组连续排列 A:J 明细，K:N 的申请人、费用类型、详细事项和识别金额合计纵向合并；7 张表的实际使用区域使用细灰边框
 - **人民币单币种**：批次资料不提取、不返回、不展示币种，也不按历史币种值拆分汇总；`source_documents.currency` 旧列仅为数据库兼容保留。同组部分金额缺失时合计已有识别金额并标记风险，全部缺失时合计为空
 - **分类规则 2.0**：优先顺序为差旅费、交通费、快递费、物流费、项目成本、招待费、职工福利费，办公费和其他明确类型继续自适应；福利类历史名称统一归一为“职工福利费”，“合计”和“会计”属于无效费用类型，辅助表中的无效标签不参与强匹配分类
 - **审核分类 Prompt 2.0**：统一模型分别输出审核与分类证据、置信度、证据来源和独立复核标记；Prompt 明确差旅/交通、快递/物流、项目/办公、招待/福利边界，并允许稳定的其他财务类型。Python 确定性规则和辅助表强匹配继续优先，模型复核标记不得覆盖硬排除或规则分类。
-- **字段提取 Prompt 4.0**：月度资料由 LLM 按发票、支付、订单、行程/车票、收据/其他规则主提取并拆分独立交易；所有交易级金额保留两位小数字符串和原文证据。合法模型结果不与 OCR/Python 逐字段核对或补空，只有模型调用/响应无效或全部关键字段为空时才整单规则兜底
+- **字段提取分流**：月度资料按类型路由——标准发票/行程车票本地规则优先（`RULE_PRIMARY`）；高德行程单优先用 PDF 原生文字坐标按表头归列并合并跨行单元格，文本规则与 Prompt 4.3 LLM 兜底；行程单直过须每条 TRIP 含可用起终点与开始时间且记录数匹配；支付/订单等 OCR 文本 LLM 优先（`LLM_TEXT`），难例升级 vision（`LLM_VISION`）；合法结果不做字段级规则混补，仅在模型不可用/无效或全部关键字段为空时整单规则兜底。多行程起点/终点/时间按段用 `/` 有序拼接，保留重复地点。
 
 ---
 
@@ -234,7 +239,7 @@ LLM 密钥/模型：backend/.env + /api/settings
 | `routers/health.py` | 健康检查 |
 | `services/invoice_service.py` | 处理编排、字段合并、待审核判定 |
 | `services/batch_service.py` | 路径校验、流式登记、特殊规则、领取、统计、恢复和重试 |
-| `services/document_service.py` | 通用分类、严格提取、关键字段校验与公开字段映射 |
+| `services/document_service.py` | 通用分类、按类型分流提取（规则/文本 LLM/vision）、关键字段校验与公开字段映射 |
 | `services/document_prompts.py` | 多资料分类/提取 Prompt |
 | `services/expense_record_service.py` | 把文件级 JSON 转为下游一笔一行的交易视图，兼容历史数据 |
 | `services/audit_classification_service.py` | 审核筛选与费用分类的统一模型批处理、记录级缓存、失效判断、重试和耗时指标 |

@@ -2,6 +2,19 @@
 
 > 版本标识 = 自然日 `YYYY-MM-DD`。同一天内变更追加到同一版本块。
 
+## 2026-08-11
+
+- 高德行程单对齐人工语义（Prompt 4.3）：PDF 文本层保留 pdfplumber 文字坐标，按表头列边界归列并合并跨行起点/终点；单行程使用页首行程时间范围，多行程按段用 `/` 有序展示开始时间且保留重复地点。
+- 行程 `RULE_PRIMARY` 改为逐条 TRIP 门控（起终点、开始时间、记录数与“共计 N 单”一致），标题/表头碎片不得写入地点；坐标不完整时回退文本规则再升 LLM。四月 9 份样本固化为 `tests/fixtures/gaode_itinerary_golden.json` 回归。
+
+## 2026-08-10
+
+- 侧栏品牌标识：将红色占位块替换为「超元力」logo 图片（`frontend/src/assets/logo-chaoyuanli.png`）。
+- 展示字段抽取强化（Prompt 4.2）：高德/打车行程规则解析起终点与时间，表头词不得写入对方；行程 `RULE_PRIMARY` 须含可用起终点否则升 LLM；发票 `item_name` 清洗剥离税率数量碎片；支付规则分离商家订单号与交易单号。
+- 月度资料识别改为按类型分流：标准发票/行程车票本地规则（含 FieldExtractor）优先可达 `RULE_PRIMARY`；支付/订单等 OCR 文本充足时仅文本 LLM，稀疏或仍缺关键字段再升级 vision；`_validation` 增加 `LLM_TEXT`/`LLM_VISION`/`escalation_path`。本阶段不接商业票面 API、不改 OCR worker 并发。
+- 月度字段提取升级为 Prompt 4.1：强化发票项目名称、支付订单号与行程起终点/时间提取；Python 将多值以 `; ` 汇总写入 `source_documents` 新列（`item_name`、`order_number`、`trip_origin`、`trip_destination`、`trip_time_text`）并双写 JSON。
+- 启动时对已有库执行 `ADD COLUMN IF NOT EXISTS`；识别结果 Excel 与 Batch 列表新增对应展示列；支付交易号与订单号分列展示；历史已识别数据需重新处理后回填。
+
 ## 2026-08-04
 
 - 统一审核分类提示词升级为 Prompt 2.0：增加任务隔离、证据优先级、八类费用定义、易混淆边界、其他稳定财务类型约束、置信度标尺、示例和输出前检查；禁止使用“采购费”“消费费”“其他费用”等泛化标签创造费用类型。

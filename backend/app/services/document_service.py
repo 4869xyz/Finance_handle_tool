@@ -24,11 +24,12 @@ from app.services.document_prompts import (
     build_document_extraction_prompt,
 )
 from app.services.llm_service import get_llm_service
-from app.services.ocr_service import get_ocr_service
+from app.services.ocr_service import get_field_extractor, get_ocr_service
 
 
 logger = logging.getLogger(__name__)
 DOCUMENT_EXTRACTION_MAX_OUTPUT_TOKENS = 12000
+OCR_TEXT_SUFFICIENT_CHARS = 40
 
 
 class ClassificationModel(BaseModel):
@@ -223,6 +224,7 @@ class ExtractionModel(BaseModel):
     counterparty: str | None
     description: str | None
     amount: Decimal | None
+    item_name: str | None = None
     invoice_number: str | None
     transaction_number: str | None
     provider: str | None
@@ -255,6 +257,7 @@ class ExtractionModel(BaseModel):
     @field_validator(
         "counterparty",
         "description",
+        "item_name",
         "invoice_number",
         "transaction_number",
         "provider",
@@ -311,6 +314,11 @@ class DocumentProcessingResult:
     amount: Decimal | None = None
     invoice_number: str | None = None
     transaction_number: str | None = None
+    item_name: str | None = None
+    order_number: str | None = None
+    trip_origin: str | None = None
+    trip_destination: str | None = None
+    trip_time_text: str | None = None
     extracted_fields_json: dict[str, Any] | None = None
     classification_raw_response: str | None = None
     extraction_raw_response: str | None = None
@@ -334,6 +342,14 @@ INVOICE_TYPES = {
 ITINERARY_TYPES = {
     DocumentType.ITINERARY,
     DocumentType.TRAIN_OR_AIR_TICKET,
+}
+STRUCTURED_DOCUMENT_TYPES = INVOICE_TYPES | ITINERARY_TYPES
+LLM_FIRST_DOCUMENT_TYPES = {
+    DocumentType.PAYMENT_SCREENSHOT,
+    DocumentType.ORDER_SCREENSHOT,
+    DocumentType.RECEIPT,
+    DocumentType.OVERSEAS_INVOICE_OR_RECEIPT,
+    DocumentType.OTHER_DOCUMENT,
 }
 
 
@@ -380,6 +396,7 @@ _EXTRACTION_FIELDS = {
     "counterparty",
     "description",
     "amount",
+    "item_name",
     "invoice_number",
     "transaction_number",
     "provider",
@@ -412,7 +429,7 @@ _TRANSACTION_FIELDS = {
     "transaction_number",
 }
 _AMOUNT_COMPONENT_FIELDS = {"label", "amount", "operation"}
-_EXTRACTION_STRATEGY = "LLM_PRIMARY_WHOLE_DOCUMENT_FALLBACK"
+_EXTRACTION_STRATEGY = "TYPE_ROUTED_RULE_THEN_LLM"
 
 
 def _empty_to_none(value: Any) -> Any:
@@ -644,8 +661,16 @@ def extract_fields_by_rules(text: str, ocr_confidence: float) -> ExtractionModel
         [r"发票号码\s*[:：]?\s*([A-Za-z0-9]{8,30})"],
         text,
     )
+    order_number = _first_match(
+        [
+            r"(?:商家订单号|商户订单号|订单编号|订单号)\s*[:：]?\s*([A-Za-z0-9_-]{6,64})",
+        ],
+        text,
+    )
     transaction_number = _first_match(
-        [r"(?:交易单号|交易号|订单号|订单编号)\s*[:：]?\s*([A-Za-z0-9_-]{6,64})"],
+        [
+            r"(?:交易单号|支付单号|转账单号|交易号)\s*[:：]?\s*([A-Za-z0-9_-]{6,64})",
+        ],
         text,
     )
     seller = _first_match(
@@ -654,6 +679,14 @@ def extract_fields_by_rules(text: str, ocr_confidence: float) -> ExtractionModel
         ],
         text,
     )
+    dirty_item = _first_match(
+        [
+            r"(\*[^*\n]+\*[^\n\r]{0,80})",
+            r"((?:运输服务|电信服务|餐饮服务)\*[^\n\r]{2,40})",
+        ],
+        text,
+    )
+    item_name = _clean_invoice_item_name(dirty_item)
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     parsed_amount = _decimal_or_none(amount_value)
 
@@ -662,6 +695,7 @@ def extract_fields_by_rules(text: str, ocr_confidence: float) -> ExtractionModel
         counterparty=seller,
         description=lines[0][:500] if lines else None,
         amount=parsed_amount,
+        item_name=item_name,
         invoice_number=invoice_number,
         transaction_number=transaction_number,
         provider=seller,
@@ -671,7 +705,7 @@ def extract_fields_by_rules(text: str, ocr_confidence: float) -> ExtractionModel
         total_with_tax=parsed_amount,
         payment_amount=parsed_amount,
         trip_amount=parsed_amount,
-        order_number=transaction_number,
+        order_number=order_number,
         aggregate_amount=parsed_amount,
         amount_derivation="EXPLICIT" if parsed_amount is not None else "NOT_FOUND",
         amount_evidence=(
@@ -683,6 +717,861 @@ def extract_fields_by_rules(text: str, ocr_confidence: float) -> ExtractionModel
         transactions=[],
         confidence=max(0.0, min(1.0, ocr_confidence / 100)),
     )
+
+
+def _parse_rule_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    normalized = (
+        str(value)
+        .replace("年", "-")
+        .replace("月", "-")
+        .replace("日", "")
+        .replace("/", "-")
+        .replace(".", "-")
+        .strip()
+    )
+    try:
+        year, month, day = [int(part) for part in normalized.split("-")[:3]]
+        return date(year, month, day)
+    except (TypeError, ValueError):
+        return None
+
+
+def _rule_confidence(ocr_confidence: float) -> float:
+    return max(0.0, min(1.0, ocr_confidence / 100))
+
+
+def _clean_invoice_item_name(value: str | None) -> str | None:
+    """Keep project/service name; strip qty/rate/tax debris after the name."""
+    if value is None:
+        return None
+    cleaned = re.sub(r"\s+", " ", str(value)).strip()
+    if not cleaned:
+        return None
+    # Cut at first long decimal / percent / standalone qty pattern after the name.
+    cleaned = re.split(
+        r"\s+(?=\d+\.\d{3,}|\d+(?:\.\d+)?%|\d+\s+\d+\.\d+)",
+        cleaned,
+        maxsplit=1,
+    )[0].strip()
+    cleaned = re.sub(r"[\d.,%]+\s*$", "", cleaned).strip(" ;,|")
+    # Prefer "*category*name" or "category*name" core.
+    starred = re.search(r"(\*?[^*\s]+(?:\*[^*\s]+)+)", cleaned)
+    if starred:
+        cleaned = starred.group(1).lstrip("*")
+        if not cleaned.startswith("*") and "*" in cleaned:
+            # normalize to keep visible tax item style without leading junk
+            cleaned = cleaned if cleaned.count("*") >= 1 else cleaned
+    return cleaned[:200] or None
+
+
+TRIP_HEADER_TOKENS = frozenset(
+    {
+        "车型",
+        "上车时间",
+        "城市",
+        "起点",
+        "终点",
+        "金额",
+        "下车时间",
+        "里程",
+        "时长",
+    }
+)
+GAODE_TABLE_COLUMNS = (
+    ("sequence", "序号"),
+    ("provider", "服务商"),
+    ("vehicle", "车型"),
+    ("start_time", "上车时间"),
+    ("city", "城市"),
+    ("origin", "起点"),
+    ("destination", "终点"),
+    ("amount", "金额"),
+)
+TRIP_LOCATION_NOISE = frozenset(
+    {
+        "高德地图—打车—",
+        "高德地图—打车——",
+        "高德地图-打车-",
+        "高德地图",
+        "打车",
+        "行程单",
+        "电子行程单",
+        "AMAP",
+        "ITINERARY",
+    }
+)
+
+
+def _is_trip_header_text(value: str | None) -> bool:
+    if not value:
+        return False
+    normalized = re.sub(r"\s+", "", value)
+    if not normalized:
+        return False
+    # Exact header row or header-word soup
+    tokens = re.split(r"[\s/|]+", value.strip())
+    meaningful = [token for token in tokens if token]
+    if not meaningful:
+        return False
+    header_hits = sum(1 for token in meaningful if token in TRIP_HEADER_TOKENS)
+    if header_hits >= 2:
+        return True
+    return normalized in {"".join(TRIP_HEADER_TOKENS), "车型上车时间城市起点终点金额"}
+
+
+def _sanitize_trip_party(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = re.sub(r"\s+", " ", value).strip()
+    if not cleaned or _is_trip_header_text(cleaned):
+        return None
+    return cleaned[:80] or None
+
+
+def _is_invalid_trip_location(value: str | None) -> bool:
+    if not value:
+        return True
+    cleaned = re.sub(r"\s+", "", value).strip()
+    if not cleaned or _is_trip_header_text(cleaned):
+        return True
+    if cleaned in TRIP_LOCATION_NOISE:
+        return True
+    return bool(
+        ("高德地图" in cleaned or "AMAP" in cleaned)
+        and ("打车" in cleaned or "行程" in cleaned or "ITINERARY" in cleaned)
+    )
+
+
+def _sanitize_trip_location(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = re.sub(r"\s+", "", value).strip(" /|")
+    if _is_invalid_trip_location(cleaned):
+        return None
+    return cleaned[:200] or None
+
+
+def _layout_cell_text(
+    items: list[dict[str, Any]],
+    *,
+    preserve_space: bool = False,
+) -> str | None:
+    ordered = sorted(
+        items,
+        key=lambda item: (
+            float(item.get("min_y", 0)),
+            float(item.get("min_x", 0)),
+        ),
+    )
+    parts = [str(item.get("text") or "").strip() for item in ordered]
+    parts = [part for part in parts if part]
+    if not parts:
+        return None
+    return (" " if preserve_space else "").join(parts)
+
+
+def _parse_gaode_trip_range(text: str) -> tuple[str | None, str | None]:
+    match = re.search(
+        r"行程时间\s*[:：]\s*"
+        r"(?P<start>\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2})\s*"
+        r"至\s*"
+        r"(?P<end>\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2})",
+        text,
+    )
+    if not match:
+        return None, None
+    return match.group("start"), match.group("end")
+
+
+def _parse_gaode_layout_rows(
+    text: str,
+    layout_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Restore Gaode table cells from native PDF word coordinates."""
+    if not layout_items:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    pages = sorted({int(item.get("page", 1)) for item in layout_items})
+    for page_number in pages:
+        page_items = [
+            item
+            for item in layout_items
+            if int(item.get("page", 1)) == page_number
+            and item.get("text")
+            and item.get("center_x") is not None
+            and item.get("center_y") is not None
+        ]
+        sequence_headers = [
+            item for item in page_items if str(item["text"]).strip() == "序号"
+        ]
+        for sequence_header in sequence_headers:
+            header_y = float(sequence_header["center_y"])
+            headers: dict[str, dict[str, Any]] = {}
+            for field_name, label in GAODE_TABLE_COLUMNS:
+                candidates = [
+                    item
+                    for item in page_items
+                    if str(item["text"]).strip() == label
+                    and abs(float(item["center_y"]) - header_y) <= 5
+                ]
+                if candidates:
+                    headers[field_name] = min(
+                        candidates,
+                        key=lambda item: abs(float(item["center_y"]) - header_y),
+                    )
+            if len(headers) != len(GAODE_TABLE_COLUMNS):
+                continue
+
+            fields = [field_name for field_name, _ in GAODE_TABLE_COLUMNS]
+            centers = [float(headers[field]["center_x"]) for field in fields]
+            boundaries = [
+                (centers[index] + centers[index + 1]) / 2
+                for index in range(len(centers) - 1)
+            ]
+            header_bottom = max(float(item["max_y"]) for item in headers.values())
+            row_anchors = sorted(
+                [
+                    item
+                    for item in page_items
+                    if re.fullmatch(r"[1-9]\d*", str(item["text"]).strip())
+                    and float(item["center_y"]) > header_bottom
+                    and float(item["center_x"]) < boundaries[0]
+                ],
+                key=lambda item: float(item["center_y"]),
+            )
+            if not row_anchors:
+                continue
+
+            footer_positions = [
+                float(item["min_y"])
+                for item in page_items
+                if float(item["min_y"]) > header_bottom
+                and str(item["text"]).strip().startswith(("说明", "页码"))
+            ]
+            footer_y = min(footer_positions) if footer_positions else None
+
+            for index, anchor in enumerate(row_anchors):
+                anchor_y = float(anchor["center_y"])
+                upper_y = (
+                    header_bottom
+                    if index == 0
+                    else (
+                        float(row_anchors[index - 1]["center_y"]) + anchor_y
+                    )
+                    / 2
+                )
+                lower_y = (
+                    (
+                        anchor_y + float(row_anchors[index + 1]["center_y"])
+                    )
+                    / 2
+                    if index + 1 < len(row_anchors)
+                    else footer_y or anchor_y + 20
+                )
+                row_items = [
+                    item
+                    for item in page_items
+                    if upper_y < float(item["center_y"]) < lower_y
+                ]
+                cells: dict[str, list[dict[str, Any]]] = {
+                    field: [] for field in fields
+                }
+                for item in row_items:
+                    center_x = float(item["center_x"])
+                    column_index = sum(center_x > boundary for boundary in boundaries)
+                    cells[fields[column_index]].append(item)
+
+                start_text = _layout_cell_text(
+                    cells["start_time"],
+                    preserve_space=True,
+                )
+                start_match = re.search(
+                    r"(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})",
+                    start_text or "",
+                )
+                origin = _sanitize_trip_location(
+                    _layout_cell_text(cells["origin"])
+                )
+                destination = _sanitize_trip_location(
+                    _layout_cell_text(cells["destination"])
+                )
+                if not start_match or not origin or not destination:
+                    continue
+                start_time = f"{start_match.group(1)} {start_match.group(2)}"
+                rows.append(
+                    {
+                        "row_number": int(str(anchor["text"]).strip()),
+                        "document_date": _parse_rule_date(start_match.group(1)),
+                        "origin": origin,
+                        "destination": destination,
+                        "time": start_time,
+                        "end_time": None,
+                        "amount": _decimal_or_none(
+                            _first_match(
+                                [r"(\d+(?:\.\d{1,2})?)"],
+                                _layout_cell_text(cells["amount"]) or "",
+                            )
+                        ),
+                        "provider": _sanitize_trip_party(
+                            _layout_cell_text(cells["provider"])
+                        ),
+                        "vehicle": _sanitize_trip_party(
+                            _layout_cell_text(cells["vehicle"])
+                        ),
+                        "city": _sanitize_trip_party(
+                            _layout_cell_text(cells["city"])
+                        ),
+                    }
+                )
+            break
+
+    rows.sort(key=lambda row: (row["row_number"], row["time"]))
+    range_start, range_end = _parse_gaode_trip_range(text)
+    if len(rows) == 1 and range_start == rows[0]["time"]:
+        rows[0]["end_time"] = range_end
+    return rows
+
+
+def _parse_gaode_trip_rows(
+    text: str,
+    layout_items: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Parse Gaode/ride-hail itinerary table body rows when present."""
+    layout_rows = _parse_gaode_layout_rows(text, layout_items or [])
+    if layout_rows:
+        return layout_rows
+
+    rows: list[dict[str, Any]] = []
+    # Common OCR / text-layer layouts without coordinates:
+    # 1) 1 曹操出行 经济型 2025-04-15 08:30 深圳 起点A 终点B 21.90元
+    # 2) 2025-04-15 08:30 经济型 深圳 起点A 终点B 21.90
+    # 3) 起点A 终点B ... 08:30 ... 21.90
+    line_patterns = [
+        re.compile(
+            r"^(?:(?P<seq>[1-9]\d*)\s+)?"
+            r"(?P<provider>[^\s]{2,20})\s+"
+            r"(?P<vehicle>[^\s]{1,12})\s+"
+            r"(?P<date>\d{4}-\d{2}-\d{2})\s+"
+            r"(?P<time>\d{1,2}:\d{2})\s+"
+            r"(?P<city>[^\s]{2,12})\s+"
+            r"(?P<origin>.+?)\s+"
+            r"(?P<destination>.+?)\s+"
+            r"(?P<amount>\d+\.\d{2})\s*元?\s*$"
+        ),
+        re.compile(
+            r"(?P<date>\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}日?)?\s*"
+            r"(?P<time>\d{1,2}:\d{2}(?::\d{2})?)\s+"
+            r"(?P<vehicle>[^\s]{1,12})?\s*"
+            r"(?P<city>[^\s]{1,12})?\s*"
+            r"(?P<origin>.+?)\s+"
+            r"(?P<destination>.+?)\s+"
+            r"(?P<amount>\d+\.\d{2}|\d+)"
+            r"\s*元?\s*$"
+        ),
+        re.compile(
+            r"(?P<origin>[^\s]{2,30})\s+(?P<destination>[^\s]{2,30})\s+"
+            r"(?P<time>\d{1,2}:\d{2}(?::\d{2})?)\s+"
+            r"(?P<amount>\d+\.\d{2})"
+        ),
+        re.compile(
+            r"(?:起点|上车)[:：]?\s*(?P<origin>[^\n]{2,40}?)\s+"
+            r"(?:终点|下车)[:：]?\s*(?P<destination>[^\n]{2,40}?)"
+            r"(?:.*?上车时间[:：]?\s*(?P<time>\d{1,2}:\d{2}(?::\d{2})?))?"
+            r"(?:.*?金额[:：]?\s*[¥￥]?(?P<amount>\d+\.\d{2}|\d+))?"
+        ),
+    ]
+    for raw_line in text.splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if not line or _is_trip_header_text(line):
+            continue
+        if "高德" in line and "行程单" in line:
+            continue
+        for pattern in line_patterns:
+            match = pattern.search(line)
+            if not match:
+                continue
+            groups = match.groupdict()
+            origin = _sanitize_trip_location(groups.get("origin"))
+            destination = _sanitize_trip_location(groups.get("destination"))
+            if not origin or not destination:
+                continue
+            amount = _decimal_or_none(groups.get("amount"))
+            date_text = groups.get("date")
+            time_text = (groups.get("time") or "").strip() or None
+            parsed_date = _parse_rule_date(date_text)
+            # Full Gaode table lines include provider; keep "YYYY-MM-DD HH:MM".
+            if (
+                groups.get("provider")
+                and parsed_date is not None
+                and time_text
+                and " " not in time_text
+            ):
+                trip_time = f"{parsed_date.isoformat()} {time_text}"
+            else:
+                trip_time = time_text
+            rows.append(
+                {
+                    "document_date": parsed_date,
+                    "origin": origin,
+                    "destination": destination,
+                    "time": trip_time,
+                    "amount": amount,
+                    "provider": _sanitize_trip_party(groups.get("provider")),
+                    "vehicle": _sanitize_trip_party(groups.get("vehicle")),
+                    "city": _sanitize_trip_party(groups.get("city")),
+                }
+            )
+            break
+    range_start, range_end = _parse_gaode_trip_range(text)
+    if len(rows) == 1 and rows[0].get("time") and range_start == rows[0]["time"]:
+        rows[0]["end_time"] = range_end
+    return rows
+
+
+def _extract_trip_route(text: str) -> tuple[str | None, str | None]:
+    for raw_line in text.splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if not line or "高德地图" in line or "行程单" in line:
+            continue
+        match = re.fullmatch(
+            r"(?P<origin>[^→—]{2,80}?)\s*[→—]\s*"
+            r"(?P<destination>[^→—]{2,80})",
+            line,
+        )
+        if not match:
+            continue
+        origin = _sanitize_trip_location(match.group("origin"))
+        destination = _sanitize_trip_location(match.group("destination"))
+        if origin and destination:
+            return origin, destination
+    return None, None
+
+
+def _extraction_from_invoice_fields(
+    fields: dict[str, Any],
+    text: str,
+    ocr_confidence: float,
+) -> ExtractionModel:
+    seller = fields.get("seller_name")
+    total = _decimal_or_none(
+        str(fields["total_with_tax"]) if fields.get("total_with_tax") is not None else None
+    )
+    amount = _decimal_or_none(
+        str(fields["amount"]) if fields.get("amount") is not None else None
+    )
+    primary_amount = total or amount
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    item_name = _clean_invoice_item_name(fields.get("item_name"))
+    if item_name is None:
+        item_name = _clean_invoice_item_name(
+            _first_match(
+                [
+                    r"(\*[^*\n]+\*[^\n\r]{0,80})",
+                    r"((?:运输服务|电信服务|餐饮服务)\*[^\n\r]{2,80})",
+                ],
+                text,
+            )
+        )
+    description = item_name or (lines[0][:500] if lines else None)
+    return ExtractionModel(
+        document_date=_parse_rule_date(fields.get("issue_date")),
+        counterparty=seller,
+        description=description,
+        amount=primary_amount,
+        item_name=item_name,
+        invoice_number=fields.get("invoice_number"),
+        transaction_number=None,
+        provider=None,
+        seller=seller,
+        payee=None,
+        merchant=None,
+        total_with_tax=total,
+        payment_amount=None,
+        trip_amount=None,
+        order_number=None,
+        aggregate_amount=None,
+        amount_derivation="EXPLICIT" if primary_amount is not None else "NOT_FOUND",
+        amount_evidence=(
+            "FieldExtractor匹配发票金额字段"
+            if primary_amount is not None
+            else None
+        ),
+        amount_components=[],
+        transactions=[],
+        confidence=_rule_confidence(ocr_confidence),
+    )
+
+
+def _extract_itinerary_by_rules(
+    text: str,
+    ocr_confidence: float,
+    layout_items: list[dict[str, Any]] | None = None,
+) -> ExtractionModel:
+    parsed_date = _parse_rule_date(
+        _first_match(
+            [
+                r"(?:行程日期|乘车日期|乘机日期|出发日期|出行日期|日期)\s*[:：]?\s*(\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}日?)",
+                r"\b(\d{4}-\d{2}-\d{2})\b",
+            ],
+            text,
+        )
+    )
+    amount_value = _first_match(
+        [
+            r"(?:票价|车费|行程金额|合计|总计|实付|行程费用合计)\s*[:：]?\s*[¥￥]?\s*([\d,]+(?:\.\d{1,2})?)",
+            r"[¥￥]\s*([\d,]+\.\d{2})",
+        ],
+        text,
+    )
+    provider = _sanitize_trip_party(
+        _first_match(
+            [
+                r"(?:承运方|承运人|服务商|出租汽车公司)\s*[:：]?\s*([^\n\r]{2,80})",
+            ],
+            text,
+        )
+    )
+    if provider is None:
+        for brand in (
+            "曹操出行",
+            "喜行约车",
+            "博度出行",
+            "携华出行",
+            "添猫出行",
+            "立道出行",
+            "风韵出行",
+            "AA出行",
+            "滴滴出行",
+            "美团打车",
+            "中国铁路",
+            "铁路客运",
+            "高德打车",
+            "高德地图",
+        ):
+            if brand in text:
+                provider = brand
+                break
+    if provider is None:
+        airline = _first_match([r"([^\n]{0,20}航空)"], text)
+        provider = _sanitize_trip_party(airline)
+    if provider is None and ("高德" in text and "行程" in text):
+        provider = "高德打车"
+    route_origin, route_destination = _extract_trip_route(text)
+    trip_origin = _sanitize_trip_location(
+        _first_match(
+            [
+                r"(?:出发站|起点|上车点|上车)\s*[:：]\s*([^\n\r]{2,40})",
+            ],
+            text,
+        )
+    ) or route_origin
+    trip_destination = _sanitize_trip_location(
+        _first_match(
+            [
+                r"(?:到达站|终点|下车点|下车)\s*[:：]\s*([^\n\r]{2,40})",
+            ],
+            text,
+        )
+    ) or route_destination
+    trip_time = _first_match(
+        [
+            r"(?:发车时间|起飞时间|出发时间|上车时间)\s*[:：]\s*([^\n\r]{4,40})",
+            r"\b(\d{1,2}:\d{2}(?:\s*[-~—]\s*\d{1,2}:\d{2})?)\b",
+        ],
+        text,
+    )
+    ticket_number = _first_match(
+        [
+            r"(?:取票号|电子客票号|票号|车次|航班号)\s*[:：]?\s*([A-Za-z0-9-]{4,32})",
+        ],
+        text,
+    )
+    parsed_amount = _decimal_or_none(amount_value)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    description = next(
+        (
+            line[:500]
+            for line in lines
+            if not _is_trip_header_text(line)
+        ),
+        None,
+    )
+    gaode_rows = _parse_gaode_trip_rows(text, layout_items)
+    if gaode_rows:
+        if trip_origin is None:
+            trip_origin = gaode_rows[0].get("origin")
+        if trip_destination is None:
+            trip_destination = gaode_rows[0].get("destination")
+        if trip_time is None:
+            trip_time = gaode_rows[0].get("time")
+        if parsed_date is None:
+            parsed_date = gaode_rows[0].get("document_date")
+        if parsed_amount is None:
+            amounts = [row["amount"] for row in gaode_rows if row.get("amount") is not None]
+            if amounts:
+                parsed_amount = sum(amounts, Decimal("0.00")).quantize(Decimal("0.01"))
+
+    extraction = ExtractionModel(
+        document_date=parsed_date,
+        counterparty=provider,
+        description=description,
+        amount=parsed_amount,
+        item_name=None,
+        invoice_number=None,
+        transaction_number=ticket_number,
+        provider=provider,
+        seller=None,
+        payee=None,
+        merchant=None,
+        total_with_tax=None,
+        payment_amount=None,
+        trip_amount=parsed_amount,
+        order_number=None,
+        aggregate_amount=None,
+        amount_derivation="EXPLICIT" if parsed_amount is not None else "NOT_FOUND",
+        amount_evidence=(
+            "OCR/Python规则匹配行程金额标签"
+            if parsed_amount is not None
+            else None
+        ),
+        amount_components=[],
+        transactions=[],
+        confidence=_rule_confidence(ocr_confidence),
+    )
+    if gaode_rows:
+        records: list[RecordExtraction] = []
+        expected_count_match = re.search(r"共计\s*(\d+)\s*单行程", text)
+        expected_count = (
+            int(expected_count_match.group(1))
+            if expected_count_match
+            else len(gaode_rows)
+        )
+        record_count_mismatch = expected_count != len(gaode_rows)
+        for index, row in enumerate(gaode_rows, start=1):
+            row_amount = row.get("amount")
+            evidence = (
+                "行程表行金额"
+                if row_amount is not None
+                else None
+            )
+            records.append(
+                RecordExtraction(
+                    record_id=f"R{index}",
+                    record_type="TRIP",
+                    document_date=row.get("document_date") or parsed_date,
+                    counterparty=provider,
+                    description=description,
+                    transaction_number=ticket_number,
+                    primary_amount=EvidenceAmount(
+                        value=row_amount,
+                        evidence=evidence,
+                        kind="TRIP_TOTAL",
+                    ),
+                    trip=TripDetail(
+                        origin=row.get("origin"),
+                        destination=row.get("destination"),
+                        start_time=row.get("time"),
+                        end_time=row.get("end_time"),
+                        service_provider=provider,
+                        vehicle_type=row.get("vehicle"),
+                        city=row.get("city"),
+                        stated_total=EvidenceAmount(
+                            value=row_amount,
+                            evidence=evidence,
+                            kind="TRIP_TOTAL",
+                        ),
+                    ),
+                    manual_review=record_count_mismatch,
+                    review_reasons=(
+                        ["GAODE_RECORD_COUNT_MISMATCH"]
+                        if record_count_mismatch
+                        else []
+                    ),
+                    confidence=extraction.confidence,
+                )
+            )
+        extraction.records = records
+    elif trip_origin or trip_destination or trip_time:
+        extraction.records = [
+            RecordExtraction(
+                record_id="R1",
+                record_type="TRIP",
+                document_date=parsed_date,
+                counterparty=provider,
+                description=description,
+                transaction_number=ticket_number,
+                primary_amount=EvidenceAmount(
+                    value=parsed_amount,
+                    evidence=extraction.amount_evidence,
+                    kind="TRIP_TOTAL",
+                ),
+                trip=TripDetail(
+                    origin=trip_origin,
+                    destination=trip_destination,
+                    start_time=trip_time,
+                    service_provider=provider,
+                    stated_total=EvidenceAmount(
+                        value=parsed_amount,
+                        evidence=extraction.amount_evidence,
+                        kind="TRIP_TOTAL",
+                    ),
+                ),
+                confidence=extraction.confidence,
+            )
+        ]
+    return extraction
+
+
+def extract_fields_by_type_rules(
+    document_type: DocumentType,
+    text: str,
+    ocr_confidence: float,
+    layout_items: list[dict[str, Any]] | None = None,
+) -> ExtractionModel:
+    """Type-aware local extraction for structured documents."""
+    if document_type in INVOICE_TYPES:
+        fields = get_field_extractor().extract_fields(text, None)
+        return _extraction_from_invoice_fields(fields, text, ocr_confidence)
+    if document_type in ITINERARY_TYPES:
+        return _extract_itinerary_by_rules(text, ocr_confidence, layout_items)
+    return extract_fields_by_rules(text, ocr_confidence)
+
+
+def _ocr_text_sufficient(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", text or "")
+    return len(normalized) >= OCR_TEXT_SUFFICIENT_CHARS
+
+
+def _is_image_file_type(file_type: str) -> bool:
+    return file_type in {"jpg", "jpeg", "png"}
+
+
+def _missing_for_extraction(
+    document_type: DocumentType,
+    extraction: ExtractionModel,
+    mapped: dict[str, Any],
+) -> list[str]:
+    if extraction.records:
+        return _record_missing_critical_fields(extraction.records)
+    return missing_critical_fields(document_type, mapped)
+
+
+def _rule_extraction_acceptable(
+    document_type: DocumentType,
+    extraction: ExtractionModel,
+    mapped: dict[str, Any],
+    threshold: float,
+) -> bool:
+    if _missing_for_extraction(document_type, extraction, mapped):
+        return False
+    if extraction.confidence < threshold:
+        return False
+    if document_type in ITINERARY_TYPES:
+        trip_records = [
+            record
+            for record in extraction.records
+            if record.record_type == "TRIP"
+        ]
+        if not trip_records:
+            return False
+        for record in trip_records:
+            if record.manual_review or "GAODE_RECORD_COUNT_MISMATCH" in record.review_reasons:
+                return False
+            trip = record.trip
+            if trip is None:
+                return False
+            if (
+                _is_invalid_trip_location(trip.origin)
+                or _is_invalid_trip_location(trip.destination)
+                or not (trip.start_time or trip.request_time)
+            ):
+                return False
+        if mapped.get("counterparty") and _is_trip_header_text(str(mapped["counterparty"])):
+            return False
+    return True
+
+
+DISPLAY_FIELD_JOIN = "; "
+DISPLAY_TEXT_MAX_LEN = 1000
+ORDER_NUMBER_MAX_LEN = 150
+
+
+def _join_unique_texts(
+    values: list[str | None],
+    *,
+    max_length: int = DISPLAY_TEXT_MAX_LEN,
+) -> str | None:
+    seen: set[str] = set()
+    parts: list[str] = []
+    for value in values:
+        if value is None:
+            continue
+        cleaned = re.sub(r"\s+", " ", str(value)).strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        parts.append(cleaned)
+    if not parts:
+        return None
+    joined = DISPLAY_FIELD_JOIN.join(parts)
+    return joined[:max_length] or None
+
+
+def _format_trip_time(trip: TripDetail) -> str | None:
+    start = (trip.start_time or "").strip()
+    end = (trip.end_time or "").strip()
+    if start and end:
+        return f"{start}至{end}"
+    if start:
+        return start
+    if end:
+        return end
+    request_time = (trip.request_time or "").strip()
+    return request_time or None
+
+
+def _join_ordered_trip_values(values: list[str | None]) -> str | None:
+    if not values:
+        return None
+    cleaned_values: list[str] = []
+    for value in values:
+        if value is None:
+            return None
+        cleaned = re.sub(r"\s+", " ", str(value)).strip()
+        if not cleaned:
+            return None
+        cleaned_values.append(cleaned)
+    joined = "/".join(cleaned_values)
+    return joined[:DISPLAY_TEXT_MAX_LEN] or None
+
+
+def _promote_display_fields(extraction: ExtractionModel) -> dict[str, Any]:
+    item_names: list[str | None] = [extraction.item_name]
+    order_numbers: list[str | None] = [extraction.order_number]
+    origins: list[str | None] = []
+    destinations: list[str | None] = []
+    times: list[str | None] = []
+    for record in extraction.records:
+        order_numbers.append(record.order_number)
+        for item in record.items:
+            item_names.append(item.name_visible)
+        if record.trip is not None:
+            origins.append(record.trip.origin)
+            destinations.append(record.trip.destination)
+            times.append(_format_trip_time(record.trip))
+    return {
+        "item_name": _join_unique_texts(item_names),
+        "order_number": _join_unique_texts(
+            order_numbers,
+            max_length=ORDER_NUMBER_MAX_LEN,
+        ),
+        "trip_origin": _join_ordered_trip_values(origins),
+        "trip_destination": _join_ordered_trip_values(destinations),
+        "trip_time_text": _join_ordered_trip_values(times),
+    }
 
 
 def _map_public_fields(
@@ -705,7 +1594,7 @@ def _map_public_fields(
         amount = extraction.aggregate_amount or extraction.amount
         counterparty = extraction.merchant or extraction.counterparty
 
-    return {
+    mapped = {
         "document_date": extraction.document_date,
         "counterparty": counterparty,
         "description": extraction.description,
@@ -717,6 +1606,8 @@ def _map_public_fields(
             else extraction.transaction_number
         ),
     }
+    mapped.update(_promote_display_fields(extraction))
+    return mapped
 
 
 def _record_type_for_document(document_type: DocumentType) -> str:
@@ -757,7 +1648,11 @@ def _ensure_extraction_records(
                 ),
                 order_number=(
                     transaction.transaction_number
-                    if document_type == DocumentType.ORDER_SCREENSHOT
+                    if document_type
+                    in {
+                        DocumentType.ORDER_SCREENSHOT,
+                        DocumentType.PAYMENT_SCREENSHOT,
+                    }
                     else None
                 ),
                 transaction_number=transaction.transaction_number,
@@ -783,7 +1678,11 @@ def _ensure_extraction_records(
             invoice_number=mapped.get("invoice_number"),
             order_number=(
                 extraction.order_number
-                if document_type == DocumentType.ORDER_SCREENSHOT
+                if document_type
+                in {
+                    DocumentType.ORDER_SCREENSHOT,
+                    DocumentType.PAYMENT_SCREENSHOT,
+                }
                 else None
             ),
             transaction_number=extraction.transaction_number,
@@ -833,6 +1732,7 @@ def _record_missing_critical_fields(
 
 
 def _summarize_extraction_records(
+    document_type: DocumentType,
     extraction: ExtractionModel,
 ) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
     records = extraction.records
@@ -931,10 +1831,15 @@ def _summarize_extraction_records(
         "amount": file_amount,
         "invoice_number": _unique_record_value(records, "invoice_number"),
         "transaction_number": (
-            _unique_record_value(records, "order_number")
-            or _unique_record_value(records, "transaction_number")
+            (
+                _unique_record_value(records, "order_number")
+                or _unique_record_value(records, "transaction_number")
+            )
+            if document_type == DocumentType.ORDER_SCREENSHOT
+            else _unique_record_value(records, "transaction_number")
         ),
     }
+    mapped.update(_promote_display_fields(extraction))
     file_validation = {
         "record_count": len(records),
         "total_source": total_source,
@@ -1003,6 +1908,7 @@ def _extraction_validation(
     fallback_used: bool,
     fallback_reason: str | None,
     calculation_valid: bool,
+    escalation_path: list[str] | None = None,
 ) -> dict[str, Any]:
     validation = {
         "strategy": _EXTRACTION_STRATEGY,
@@ -1010,6 +1916,7 @@ def _extraction_validation(
         "final_source": final_source,
         "fallback_used": fallback_used,
         "fallback_reason": fallback_reason,
+        "escalation_path": "→".join(escalation_path or []),
         "amount_derivation": extraction.amount_derivation,
         "amount_evidence": extraction.amount_evidence,
         "amount_components": [
@@ -1131,9 +2038,9 @@ def process_document_content(
     settings = get_settings()
     ocr = get_ocr_service()
     if file_type == "pdf":
-        raw_text, ocr_confidence, _ = ocr.process_document_pdf(file_data)
+        raw_text, ocr_confidence, layout_items = ocr.process_document_pdf(file_data)
     else:
-        raw_text, ocr_confidence, _ = ocr.process_image(file_data)
+        raw_text, ocr_confidence, layout_items = ocr.process_image(file_data)
 
     filename_summary = filename_description_fallback(file_name)
     result = DocumentProcessingResult(
@@ -1189,103 +2096,224 @@ def process_document_content(
         return result
 
     used_model_extraction = False
-    fallback_reason = "MODEL_NOT_CONFIGURED"
+    fallback_reason: str | None = "MODEL_NOT_CONFIGURED"
     calculation_review = False
     calculation_valid = True
     record_validation: dict[str, Any] = {}
     record_review_reasons: list[str] = []
     mapped: dict[str, Any] | None = None
-    if model_available:
+    extraction: ExtractionModel | None = None
+    escalation_path: list[str] = []
+    image = file_data if _is_image_file_type(file_type) else None
+    can_vision = bool(image and model_available and get_llm_service().supports_vision())
+
+    def _adopt_extraction(
+        candidate: ExtractionModel,
+        *,
+        source: str,
+        fallback: bool,
+        reason: str | None,
+    ) -> None:
+        nonlocal extraction, mapped, calculation_review, calculation_valid
+        nonlocal record_validation, record_review_reasons
+        nonlocal used_model_extraction, fallback_reason
+        had_records = bool(candidate.records)
+        legacy_mapped = _map_public_fields(document_type, candidate)
+        calc_review = (
+            candidate.amount_derivation == "CALCULATED" and not had_records
+        )
+        calc_valid = _calculated_amount_matches_components(candidate, legacy_mapped)
+        if calc_review and not calc_valid and not candidate.records:
+            candidate.amount = None
+            candidate.total_with_tax = None
+            candidate.payment_amount = None
+            candidate.trip_amount = None
+            candidate.aggregate_amount = None
+        _ensure_extraction_records(document_type, candidate)
+        summarized, rec_validation, rec_reviews = _summarize_extraction_records(
+            document_type,
+            candidate,
+        )
+        extraction = candidate
+        mapped = summarized
+        calculation_review = calc_review
+        calculation_valid = calc_valid
+        record_validation = rec_validation
+        record_review_reasons = rec_reviews
+        used_model_extraction = source in {"LLM_TEXT", "LLM_VISION"}
+        fallback_reason = reason
+        if not fallback:
+            fallback_reason = None
+
+    def _try_llm_extraction(*, use_vision: bool) -> tuple[bool, str | None]:
+        nonlocal result
         prompt = build_document_extraction_prompt(
             document_type.value,
             raw_text[:30_000] or "[OCR 无有效文本，请依据图像提取]",
         )
         logger.info(
-            "Using document extraction prompt version=%s provider=%s model=%s document_type=%s",
+            "Using document extraction prompt version=%s provider=%s model=%s "
+            "document_type=%s mode=%s",
             DOCUMENT_EXTRACTION_PROMPT_VERSION,
             provider_name,
             model_name,
             document_type.value,
+            "VISION" if use_vision else "TEXT",
         )
-        image = file_data if file_type in {"jpg", "jpeg", "png"} else None
         try:
-            raw_extraction = _call_model(prompt, image, _mime_type(file_type))
+            raw_extraction = _call_model(
+                prompt,
+                image if use_vision else None,
+                _mime_type(file_type),
+            )
             result.extraction_raw_response = raw_extraction
             model_extraction = ExtractionModel.model_validate(
                 _coerce_extraction_payload(_strict_json(raw_extraction))
             )
-            had_model_records = bool(model_extraction.records)
-            legacy_model_mapped = _map_public_fields(document_type, model_extraction)
-            model_calculation_review = (
-                model_extraction.amount_derivation == "CALCULATED"
-                and not had_model_records
-            )
-            model_calculation_valid = _calculated_amount_matches_components(
-                model_extraction,
-                legacy_model_mapped,
-            )
-            if (
-                model_calculation_review
-                and not model_calculation_valid
-                and not model_extraction.records
-            ):
-                model_extraction.amount = None
-                model_extraction.total_with_tax = None
-                model_extraction.payment_amount = None
-                model_extraction.trip_amount = None
-                model_extraction.aggregate_amount = None
-            _ensure_extraction_records(document_type, model_extraction)
-            model_mapped, model_record_validation, model_record_reviews = (
-                _summarize_extraction_records(model_extraction)
-            )
+            model_mapped = _map_public_fields(document_type, model_extraction)
             if _all_key_fields_empty(
                 document_type,
                 model_mapped,
             ) and _all_record_key_fields_empty(model_extraction.records):
-                fallback_reason = "NO_USABLE_LLM_FIELDS"
-                result.status_detail = (
-                    "字段提取模型未返回任何有效关键字段，已回退规则抽取"
-                )
-            else:
-                extraction = model_extraction
-                mapped = model_mapped
-                calculation_review = model_calculation_review
-                calculation_valid = model_calculation_valid
-                record_validation = model_record_validation
-                record_review_reasons = model_record_reviews
-                used_model_extraction = True
+                return False, "NO_USABLE_LLM_FIELDS"
+            _adopt_extraction(
+                model_extraction,
+                source="LLM_VISION" if use_vision else "LLM_TEXT",
+                fallback=False,
+                reason=None,
+            )
+            return True, None
         except (ValueError, ValidationError, json.JSONDecodeError):
-            fallback_reason = "INVALID_MODEL_RESPONSE"
-            result.status_detail = "字段提取模型返回格式无效，已回退规则抽取"
+            return False, "INVALID_MODEL_RESPONSE"
         except Exception as exc:
-            fallback_reason = "LLM_UNAVAILABLE"
             result.status_detail = _safe_exception_detail(
                 "字段提取模型当前不可用，已回退规则抽取",
                 exc,
             )
-    if not used_model_extraction:
-        extraction = extract_fields_by_rules(raw_text, ocr_confidence)
-        _ensure_extraction_records(document_type, extraction)
-        mapped, record_validation, record_review_reasons = (
-            _summarize_extraction_records(extraction)
-        )
-        validation = _extraction_validation(
-            extraction,
-            final_source="OCR_RULE_FALLBACK",
-            fallback_used=True,
-            fallback_reason=fallback_reason,
-            calculation_valid=True,
-        )
-    else:
-        validation = _extraction_validation(
-            extraction,
-            final_source="LLM",
-            fallback_used=False,
-            fallback_reason=None,
-            calculation_valid=calculation_valid,
-        )
+            return False, "LLM_UNAVAILABLE"
 
+    def _needs_critical_upgrade() -> bool:
+        assert extraction is not None and mapped is not None
+        return bool(_missing_for_extraction(document_type, extraction, mapped))
+
+    final_source = "OCR_RULE_FALLBACK"
+    if document_type in STRUCTURED_DOCUMENT_TYPES:
+        escalation_path.append("RULE")
+        rule_extraction = extract_fields_by_type_rules(
+            document_type,
+            raw_text,
+            ocr_confidence,
+            layout_items,
+        )
+        _ensure_extraction_records(document_type, rule_extraction)
+        rule_mapped, rule_record_validation, rule_record_reviews = (
+            _summarize_extraction_records(document_type, rule_extraction)
+        )
+        if _rule_extraction_acceptable(
+            document_type,
+            rule_extraction,
+            rule_mapped,
+            settings.batch_extraction_threshold,
+        ):
+            extraction = rule_extraction
+            mapped = rule_mapped
+            record_validation = rule_record_validation
+            record_review_reasons = rule_record_reviews
+            final_source = "RULE_PRIMARY"
+            fallback_reason = None
+            used_model_extraction = False
+        else:
+            extraction = rule_extraction
+            mapped = rule_mapped
+            record_validation = rule_record_validation
+            record_review_reasons = rule_record_reviews
+            llm_ok = False
+            llm_reason: str | None = "MODEL_NOT_CONFIGURED"
+            if model_available:
+                escalation_path.append("TEXT")
+                llm_ok, llm_reason = _try_llm_extraction(use_vision=False)
+                if llm_ok:
+                    final_source = "LLM_TEXT"
+                if (not llm_ok or _needs_critical_upgrade()) and can_vision:
+                    escalation_path.append("VISION")
+                    vision_ok, vision_reason = _try_llm_extraction(use_vision=True)
+                    if vision_ok:
+                        final_source = "LLM_VISION"
+                        llm_ok = True
+                        llm_reason = None
+                    else:
+                        llm_reason = vision_reason or llm_reason
+            if not llm_ok:
+                escalation_path.append("RULE_FALLBACK")
+                extraction = extract_fields_by_rules(raw_text, ocr_confidence)
+                _ensure_extraction_records(document_type, extraction)
+                mapped, record_validation, record_review_reasons = (
+                    _summarize_extraction_records(document_type, extraction)
+                )
+                final_source = "OCR_RULE_FALLBACK"
+                fallback_reason = llm_reason or "MODEL_NOT_CONFIGURED"
+                result.status_detail = result.status_detail or (
+                    "字段提取模型未返回可用结果，已回退规则抽取"
+                    if fallback_reason == "NO_USABLE_LLM_FIELDS"
+                    else (
+                        "字段提取模型返回格式无效，已回退规则抽取"
+                        if fallback_reason == "INVALID_MODEL_RESPONSE"
+                        else None
+                    )
+                )
+                used_model_extraction = False
+    else:
+        llm_ok = False
+        llm_reason: str | None = "MODEL_NOT_CONFIGURED"
+        if model_available:
+            prefer_text = _ocr_text_sufficient(raw_text) or not can_vision
+            if prefer_text:
+                escalation_path.append("TEXT")
+                llm_ok, llm_reason = _try_llm_extraction(use_vision=False)
+                if llm_ok:
+                    final_source = "LLM_TEXT"
+            if can_vision and (
+                not prefer_text
+                or not llm_ok
+                or (llm_ok and _needs_critical_upgrade())
+            ):
+                if "VISION" not in escalation_path:
+                    escalation_path.append("VISION")
+                vision_ok, vision_reason = _try_llm_extraction(use_vision=True)
+                if vision_ok:
+                    final_source = "LLM_VISION"
+                    llm_ok = True
+                    llm_reason = None
+                else:
+                    llm_reason = vision_reason or llm_reason
+        if not llm_ok:
+            escalation_path.append("RULE_FALLBACK")
+            extraction = extract_fields_by_rules(raw_text, ocr_confidence)
+            _ensure_extraction_records(document_type, extraction)
+            mapped, record_validation, record_review_reasons = (
+                _summarize_extraction_records(document_type, extraction)
+            )
+            final_source = "OCR_RULE_FALLBACK"
+            fallback_reason = llm_reason or "MODEL_NOT_CONFIGURED"
+            used_model_extraction = False
+            if fallback_reason == "NO_USABLE_LLM_FIELDS":
+                result.status_detail = (
+                    "字段提取模型未返回任何有效关键字段，已回退规则抽取"
+                )
+            elif fallback_reason == "INVALID_MODEL_RESPONSE":
+                result.status_detail = "字段提取模型返回格式无效，已回退规则抽取"
+
+    assert extraction is not None
     assert mapped is not None
+    validation = _extraction_validation(
+        extraction,
+        final_source=final_source,
+        fallback_used=final_source == "OCR_RULE_FALLBACK",
+        fallback_reason=fallback_reason if final_source == "OCR_RULE_FALLBACK" else None,
+        calculation_valid=calculation_valid if used_model_extraction else True,
+        escalation_path=escalation_path,
+    )
+
     description_source = "DOCUMENT_CONTENT" if mapped.get("description") else "NOT_FOUND"
     if not mapped.get("description") and filename_summary:
         mapped["description"] = filename_summary
@@ -1294,6 +2322,14 @@ def process_document_content(
     validation["description_source"] = description_source
     extracted_fields_json = extraction.model_dump(mode="json")
     extracted_fields_json["description"] = mapped.get("description")
+    for display_key in (
+        "item_name",
+        "order_number",
+        "trip_origin",
+        "trip_destination",
+        "trip_time_text",
+    ):
+        extracted_fields_json[display_key] = mapped.get(display_key)
     extracted_fields_json["_validation"] = validation
     result.extracted_fields_json = extracted_fields_json
     for key, value in mapped.items():

@@ -44,9 +44,10 @@ app.include_router(settings_router.router, prefix="/api/settings", tags=["Settin
 
 @app.on_event("startup")
 async def startup():
-    from app.database import engine, Base
+    from app.database import engine, Base, ensure_source_document_display_columns
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await ensure_source_document_display_columns(conn)
 
 
 @app.get("/")

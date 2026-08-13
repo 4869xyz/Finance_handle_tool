@@ -387,8 +387,13 @@ export default function BatchPage() {
       align: 'right',
       render: (value) => value != null ? `¥${Number(value).toFixed(2)}` : '-',
     },
+    { title: '项目名称', dataIndex: 'item_name', width: 180, ellipsis: true, render: (v) => v || '-' },
     { title: '发票号', dataIndex: 'invoice_number', width: 180, render: (v) => v || '-' },
     { title: '交易/订单号', dataIndex: 'transaction_number', width: 180, render: (v) => v || '-' },
+    { title: '订单号', dataIndex: 'order_number', width: 160, ellipsis: true, render: (v) => v || '-' },
+    { title: '行程起点', dataIndex: 'trip_origin', width: 140, ellipsis: true, render: (v) => v || '-' },
+    { title: '行程终点', dataIndex: 'trip_destination', width: 140, ellipsis: true, render: (v) => v || '-' },
+    { title: '行程时间', dataIndex: 'trip_time_text', width: 180, ellipsis: true, render: (v) => v || '-' },
     {
       title: '提取置信度',
       dataIndex: 'extraction_confidence',

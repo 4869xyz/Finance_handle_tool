@@ -5,7 +5,7 @@ import signal
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.database import Base, engine
+from app.database import Base, engine, ensure_source_document_display_columns
 from app.services.batch_service import (
     process_next_queued_document,
     recover_interrupted_batches,
@@ -22,6 +22,7 @@ LOCK_RETRY_SECONDS = 5.0
 async def initialize_database() -> None:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        await ensure_source_document_display_columns(connection)
 
 
 async def try_acquire_worker_lock(connection: AsyncConnection) -> bool:
