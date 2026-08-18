@@ -85,6 +85,12 @@ class ProcessingBatch(Base):
     manual_review_files = Column(Integer, nullable=False, default=0)
     skipped_files = Column(Integer, nullable=False, default=0)
     failed_files = Column(Integer, nullable=False, default=0)
+    package_id = Column(
+        Integer,
+        ForeignKey("reimbursement_packages.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(
         DateTime,
@@ -102,6 +108,10 @@ class ProcessingBatch(Base):
         "BatchReviewReference",
         back_populates="batch",
         cascade="all, delete-orphan",
+    )
+    package = relationship(
+        "ReimbursementPackage",
+        back_populates="batches",
     )
 
 
@@ -185,5 +195,6 @@ class SourceDocument(Base):
     batch = relationship("ProcessingBatch", back_populates="documents")
 
 
-# Register the related model for workers that import batch models without routers.
+# Register related models for workers that import batch models without routers.
 from app.models.review_reference import BatchReviewReference  # noqa: E402,F401
+from app.models.reimbursement_package import ReimbursementPackage  # noqa: E402,F401

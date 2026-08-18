@@ -7,7 +7,7 @@ FastAPI 应用包。
 | 文件 | 职责 | 依赖 |
 |------|------|------|
 | `main.py` | 应用入口：CORS、路由挂载、启动建表与批次中断恢复 | `config`、`database`、`routers/*` |
-| `config.py` | Settings：DB、LLM、旧上传与批次上传限制、识别阈值/并发等 | `.env` / 环境变量 |
+| `config.py` | Settings：DB、LLM、上传限制；`.env` LLM 键热加载并覆盖进程环境 | `.env` / 环境变量 |
 | `database.py` | **数据库连接**：engine、`get_db()`、`Base` | `config.database_url` |
 | `rate_limit.py` | API 限流 | slowapi |
 | `models/` | ORM 表 | 见该目录 README |

@@ -222,15 +222,15 @@ docker compose ps
 
 ### 配置 LLM | Configure LLM
 
-系统支持 **6 种 LLM 提供商**，可在界面中实时切换：
+系统支持 **6 种 LLM 提供商**，可在「设置」中填写并保存。保存后 API 与 OCR worker 热加载 `.env`，下一份文档改用新模型，无需重建容器。已配置厂商可留空密钥只切换当前模型。DeepSeek 仅支持文本，看图识别会跳过。
 
 | Provider | Models | 获取 API Key |
 |----------|--------|-------------|
 | OpenAI | GPT-4o, GPT-4o-mini | [platform.openai.com](https://platform.openai.com/) |
 | Anthropic | Claude 3.5 Sonnet, Claude 3 Opus | [console.anthropic.com](https://console.anthropic.com/) |
 | Google | Gemini 1.5 Pro, Gemini 1.5 Flash | [aistudio.google.com](https://aistudio.google.com/) |
-| 阿里云 | 通义千问 Qwen-VL | [dashscope.console.aliyun.com](https://dashscope.console.aliyun.com/) |
-| DeepSeek | DeepSeek-VL | [platform.deepseek.com](https://platform.deepseek.com/) |
+| 阿里云 | 通义千问 Qwen-VL / qwen3.7-plus | [dashscope.console.aliyun.com](https://dashscope.console.aliyun.com/) |
+| DeepSeek | DeepSeek Chat（仅文本） | [platform.deepseek.com](https://platform.deepseek.com/) |
 | 智谱 | GLM-4V | [open.bigmodel.cn](https://open.bigmodel.cn/) |
 
 > 💡 **提示**：旧单发票流可以只使用 OCR/规则。月度资料以 LLM 进行交易级主识别；只有模型未配置、调用/响应失败或整次没有有效关键字段时，才整单使用 OCR/Python 规则兜底。跨文件核对依赖 LLM；不可用时候选组保持待确认，分类汇总仍直接使用已识别金额。
@@ -423,7 +423,7 @@ POST /api/batches/{id}/reprocess
 - [x] **v0.2** - 多LLM支持 + 双源验证
 - [x] **v0.3** - UI全面改版 + OpenRouter模型支持
 - [x] **v0.4** - 月度多资料识别第一阶段 ✨ **当前版本**
-- [ ] **v0.5** - 月度资金表核对与报表增强
+- [x] **v0.5** - 月度资金表核对与报表增强（报销提交包 + 总表「系统审核」列）
 - [ ] **v0.6** - 发票真伪验证 (对接税务API)
 - [ ] **v0.7** - 移动端适配
 - [ ] **v1.0** - 企业级功能 (审批流程、ERP集成)

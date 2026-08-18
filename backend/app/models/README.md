@@ -8,6 +8,7 @@ SQLAlchemy 表模型（数据库结构定义）。
 |------|------|------|
 | `invoice.py` | `invoices` / `ocr_results` / `llm_results` / `parsing_diffs` | `database.Base` |
 | `batch.py` | `processing_batches` / `source_documents`、来源/类型/处理状态枚举 | `database.Base` |
+| `reimbursement_package.py` | `reimbursement_packages` 提交包账本 | `database.Base` |
 | `audit_log.py` | `audit_logs` 审计日志表 | `database.Base` |
 
 ## 说明

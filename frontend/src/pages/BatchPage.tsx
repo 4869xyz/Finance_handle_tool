@@ -29,14 +29,19 @@ import type { UploadFile } from 'antd/es/upload/interface';
 import type { ColumnsType, TablePaginationConfig } from 'antd/es/table';
 
 import {
+  auditReimbursementPackage,
   createDocumentBatch,
+  createReimbursementPackage,
   exportFilteredDocumentBatch,
+  exportPackageClaims,
   getCompanyProfile,
   getBatchReviewReferenceDownloadUrl,
   getDocumentBatch,
+  getReimbursementPackage,
   listBatchDocuments,
   listDocumentBatches,
   listBatchReviewReferences,
+  listReimbursementPackages,
   reconcileDocumentBatch,
   reprocessDocumentBatch,
   uploadBatchReviewReference,
@@ -45,12 +50,15 @@ import type {
   BatchDetail,
   BatchUploadItem,
   ProcessingBatch,
+  ReimbursementPackage,
+  ReimbursementPackageDetail,
   ReviewReference,
   SourceDocument,
 } from '../types/batch';
 import {
   batchStatusLabels,
   documentTypeLabels,
+  packageStatusLabels,
   processingStatusLabels,
   reasonLabels,
   sourceFolderLabels,
@@ -61,11 +69,15 @@ import styles from './BatchPage.module.css';
 const MAX_FILE_SIZE = 150 * 1024 * 1024;
 const MAX_TOTAL_SIZE = 256 * 1024 * 1024;
 const MAX_FILES = 200;
+const MAX_PACKAGE_FILES = 600;
+const MAX_PACKAGE_TOTAL_SIZE = 768 * 1024 * 1024;
 const MAX_REFERENCE_FILE_SIZE = 10 * 1024 * 1024;
 const ACCEPTED_EXTENSIONS = new Set([
   'pdf', 'jpg', 'jpeg', 'png', 'mp4', 'mov', 'avi', 'mkv',
 ]);
+const PACKAGE_EXTRA_EXTENSIONS = new Set(['xlsx', 'txt']);
 const TERMINAL_BATCH_STATUSES = new Set(['COMPLETED', 'FAILED']);
+const TERMINAL_PACKAGE_STATUSES = new Set(['COMPLETED', 'FAILED']);
 const { Dragger } = Upload;
 const { Text, Title } = Typography;
 
@@ -94,6 +106,36 @@ function validateClientPath(path: string): boolean {
   }
   const sources = new Set(['发票', '补票', '支付凭证']);
   return sources.has(parts[0]) || (parts.length >= 3 && sources.has(parts[1]));
+}
+
+
+function validatePackagePath(path: string): boolean {
+  const normalized = path.replace(/\\/g, '/');
+  const parts = normalized.split('/');
+  if (parts.some((part) => !part || part === '.' || part === '..')) {
+    return false;
+  }
+  const name = parts[parts.length - 1];
+  const lower = name.toLowerCase();
+  if (name.endsWith('报销总表.xlsx') || lower.endsWith('.txt') || lower.endsWith('.xlsx')) {
+    return true;
+  }
+  const sources = new Set(['发票', '补票', '支付凭证']);
+  return parts.some((part) => sources.has(part));
+}
+
+
+function looksLikeReimbursementPackage(paths: string[]): boolean {
+  const sources = new Set(['发票', '补票', '支付凭证']);
+  return paths.some((path) => {
+    const normalized = path.replace(/\\/g, '/');
+    if (normalized.endsWith('报销总表.xlsx')) {
+      return true;
+    }
+    const parts = normalized.split('/');
+    const sourceIndex = parts.findIndex((part) => sources.has(part));
+    return sourceIndex >= 2;
+  });
 }
 
 
@@ -137,6 +179,14 @@ export default function BatchPage() {
   const [exportingFiltered, setExportingFiltered] = useState(false);
   const [uploadingReference, setUploadingReference] = useState(false);
   const [reviewReferences, setReviewReferences] = useState<ReviewReference[]>([]);
+  const [packageFileList, setPackageFileList] = useState<UploadFile[]>([]);
+  const [uploadingPackage, setUploadingPackage] = useState(false);
+  const [recentPackages, setRecentPackages] = useState<ReimbursementPackage[]>([]);
+  const [selectedPackage, setSelectedPackage] = useState<ReimbursementPackageDetail | null>(null);
+  const [loadingPackage, setLoadingPackage] = useState(false);
+  const [auditingPackage, setAuditingPackage] = useState(false);
+  const [exportingPackage, setExportingPackage] = useState(false);
+  const selectedPackageId = Number(searchParams.get('package') || 0) || null;
 
   const selectedFiles = useMemo(
     () => fileList.flatMap((item) => (
@@ -148,10 +198,24 @@ export default function BatchPage() {
     () => selectedFiles.reduce((total, file) => total + file.size, 0),
     [selectedFiles]
   );
+  const selectedPackageFiles = useMemo(
+    () => packageFileList.flatMap((item) => (
+      item.originFileObj ? [item.originFileObj] : []
+    )),
+    [packageFileList]
+  );
+  const selectedPackageTotalSize = useMemo(
+    () => selectedPackageFiles.reduce((total, file) => total + file.size, 0),
+    [selectedPackageFiles]
+  );
 
   const refreshRecent = useCallback(async () => {
-    const response = await listDocumentBatches(1, 10);
-    setRecentBatches(response.items);
+    const [batchResponse, packageResponse] = await Promise.all([
+      listDocumentBatches(1, 10),
+      listReimbursementPackages(1, 10),
+    ]);
+    setRecentBatches(batchResponse.items);
+    setRecentPackages(packageResponse.items);
   }, []);
 
   const refreshSelected = useCallback(async (
@@ -201,6 +265,104 @@ export default function BatchPage() {
     return () => window.clearInterval(timer);
   }, [batch, refreshRecent, refreshSelected, selectedId]);
 
+  useEffect(() => {
+    if (!selectedPackageId) {
+      setSelectedPackage(null);
+      return;
+    }
+    setLoadingPackage(true);
+    getReimbursementPackage(selectedPackageId)
+      .then(setSelectedPackage)
+      .catch((error) => message.error(errorMessage(error)))
+      .finally(() => setLoadingPackage(false));
+  }, [selectedPackageId]);
+
+  useEffect(() => {
+    if (
+      !selectedPackageId
+      || !selectedPackage
+      || TERMINAL_PACKAGE_STATUSES.has(selectedPackage.status)
+    ) {
+      return undefined;
+    }
+    const timer = window.setInterval(() => {
+      Promise.all([
+        getReimbursementPackage(selectedPackageId),
+        refreshRecent(),
+      ])
+        .then(([detail]) => setSelectedPackage(detail))
+        .catch((error) => message.error(errorMessage(error)));
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [refreshRecent, selectedPackage, selectedPackageId]);
+
+  const handlePackageUpload = async () => {
+    if (!selectedPackageFiles.length) {
+      message.warning('请选择包含报销总表和月度发票/支付凭证目录的提交包');
+      return;
+    }
+    const items: BatchUploadItem[] = selectedPackageFiles.map((file) => ({
+      file,
+      relativePath: browserRelativePath(file),
+    }));
+    if (items.some((item) => !validatePackagePath(item.relativePath))) {
+      message.error('提交包内文件必须包含报销总表，且票据位于发票、补票或支付凭证目录下');
+      return;
+    }
+    if (!items.some((item) => item.relativePath.replace(/\\/g, '/').endsWith('报销总表.xlsx'))) {
+      message.error('提交包必须包含一份报销总表.xlsx');
+      return;
+    }
+    setUploadingPackage(true);
+    try {
+      const created = await createReimbursementPackage(items);
+      message.success(`提交包 #${created.id} 已登记，正在按月识别`);
+      setPackageFileList([]);
+      setSearchParams({ package: String(created.id) });
+      await refreshRecent();
+    } catch (error) {
+      message.error(errorMessage(error));
+    } finally {
+      setUploadingPackage(false);
+    }
+  };
+
+  const handlePackageAudit = async () => {
+    if (!selectedPackageId) return;
+    setAuditingPackage(true);
+    try {
+      const response = await auditReimbursementPackage(selectedPackageId);
+      message.success(response.message);
+      const detail = await getReimbursementPackage(selectedPackageId);
+      setSelectedPackage(detail);
+      await refreshRecent();
+    } catch (error) {
+      message.error(errorMessage(error));
+    } finally {
+      setAuditingPackage(false);
+    }
+  };
+
+  const handlePackageExport = async () => {
+    if (!selectedPackageId || !selectedPackage) return;
+    setExportingPackage(true);
+    try {
+      const blob = await exportPackageClaims(selectedPackageId);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${selectedPackage.employee_name}-报销总表-系统审核.xlsx`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      message.error(errorMessage(error));
+    } finally {
+      setExportingPackage(false);
+    }
+  };
+
   const handleUpload = async () => {
     if (!employeeName.trim() || !expenseMonth) {
       message.warning('请填写员工姓名和报销月份');
@@ -214,6 +376,10 @@ export default function BatchPage() {
       file,
       relativePath: browserRelativePath(file),
     }));
+    if (looksLikeReimbursementPackage(items.map((item) => item.relativePath))) {
+      message.error('这是含总表的报销提交包，请使用页面上方「上传报销提交包」，不要用单月识别批次');
+      return;
+    }
     if (items.some((item) => !validateClientPath(item.relativePath))) {
       message.error('目录中存在未知来源；文件必须位于发票、补票或支付凭证目录下');
       return;
@@ -418,12 +584,69 @@ export default function BatchPage() {
         <div>
           <Title level={1} className={styles.pageTitle}>月度资料识别</Title>
           <Text type="secondary">
-            选择员工月度目录，统一登记发票、补票和支付凭证并跟踪识别结果。
+            含总表的「姓名-报销」文件夹请用提交包上传；单月目录仍可在下方单独建批次。
           </Text>
         </div>
       </header>
 
-      <Card title="新建识别批次">
+      <Card title="上传报销提交包">
+        <Text type="secondary">
+          请选择「马耿宾-报销」这类文件夹：内含报销总表.xlsx，以及各月发票、补票、支付凭证。不要填姓名/月份，也不要用下面的单月入口。
+        </Text>
+        <Dragger
+          directory
+          multiple
+          accept=".pdf,.jpg,.jpeg,.png,.mp4,.mov,.avi,.mkv,.xlsx,.txt"
+          fileList={packageFileList}
+          showUploadList={false}
+          beforeUpload={(file) => {
+            const extension = file.name.split('.').pop()?.toLowerCase() || '';
+            if (!ACCEPTED_EXTENSIONS.has(extension) && !PACKAGE_EXTRA_EXTENSIONS.has(extension)) {
+              message.error(`不支持的文件类型：${file.name}`);
+              return Upload.LIST_IGNORE;
+            }
+            if (file.size > MAX_FILE_SIZE) {
+              message.error(`单个文件不能超过 150 MiB：${file.name}`);
+              return Upload.LIST_IGNORE;
+            }
+            return false;
+          }}
+          onChange={({ fileList: nextList }) => {
+            const nextFiles = nextList.flatMap((item) => (
+              item.originFileObj ? [item.originFileObj] : []
+            ));
+            const total = nextFiles.reduce((sum, file) => sum + file.size, 0);
+            if (nextFiles.length > MAX_PACKAGE_FILES || total > MAX_PACKAGE_TOTAL_SIZE) {
+              message.error('提交包最多 600 个文件且总大小不能超过 768 MiB');
+              return;
+            }
+            setPackageFileList(nextList);
+          }}
+        >
+          <p className="ant-upload-drag-icon"><FolderOpenOutlined /></p>
+          <p className="ant-upload-text">点击或拖入报销提交包文件夹</p>
+          <p className="ant-upload-hint">
+            需包含报销总表.xlsx；票据仍须位于发票、补票或支付凭证目录下。
+          </p>
+        </Dragger>
+        <div className={styles.uploadSummary}>
+          <Text>
+            已选择 {selectedPackageFiles.length} 个文件，
+            {(selectedPackageTotalSize / 1024 / 1024).toFixed(2)} MiB
+          </Text>
+          <Button
+            type="primary"
+            icon={<UploadOutlined />}
+            loading={uploadingPackage}
+            disabled={!selectedPackageFiles.length}
+            onClick={handlePackageUpload}
+          >
+            上传提交包并开始识别
+          </Button>
+        </div>
+      </Card>
+
+      <Card title="新建识别批次（仅单月）">
         <div className={styles.formRow}>
           <Input
             value={employeeName}
@@ -491,6 +714,96 @@ export default function BatchPage() {
           </Button>
         </div>
       </Card>
+
+      <Card title="最近提交包">
+        <List
+          dataSource={recentPackages}
+          locale={{ emptyText: '暂无提交包' }}
+          renderItem={(item) => (
+            <List.Item
+              className={selectedPackageId === item.id ? styles.selectedBatch : undefined}
+              actions={[
+                <Button
+                  key="view"
+                  type="link"
+                  onClick={() => setSearchParams({ package: String(item.id) })}
+                >
+                  查看
+                </Button>,
+              ]}
+            >
+              <List.Item.Meta
+                title={`${item.employee_name} · 提交包 #${item.id}`}
+                description={`${item.claim_count} 条总表明细 · ${dayjs(item.created_at).format('YYYY-MM-DD HH:mm')}`}
+              />
+              <Tag color={statusColor(item.status)}>{packageStatusLabels[item.status]}</Tag>
+            </List.Item>
+          )}
+        />
+      </Card>
+
+      {selectedPackage ? (
+        <Card
+          loading={loadingPackage}
+          title={`${selectedPackage.employee_name} · 提交包 #${selectedPackage.id}`}
+          extra={(
+            <Space wrap>
+              <Tag color={statusColor(selectedPackage.status)}>
+                {packageStatusLabels[selectedPackage.status]}
+              </Tag>
+              <Button
+                icon={<ReloadOutlined />}
+                loading={auditingPackage}
+                disabled={!selectedPackage.batches.every((item) => TERMINAL_BATCH_STATUSES.has(item.status))}
+                onClick={handlePackageAudit}
+              >
+                审核总表
+              </Button>
+              <Button
+                type="primary"
+                icon={<DownloadOutlined />}
+                loading={exportingPackage}
+                disabled={!selectedPackage.audited_at}
+                onClick={handlePackageExport}
+              >
+                下载系统审核总表
+              </Button>
+            </Space>
+          )}
+        >
+          <Text type="secondary">
+            {selectedPackage.original_filename} · {selectedPackage.claim_count} 条明细
+            {selectedPackage.months.length ? ` · ${selectedPackage.months.join('、')}` : ''}
+          </Text>
+          <List
+            size="small"
+            dataSource={selectedPackage.batches}
+            locale={{ emptyText: '暂无月份批次' }}
+            renderItem={(item) => (
+              <List.Item
+                actions={[
+                  <Button
+                    key="batch"
+                    type="link"
+                    onClick={() => {
+                      setDocumentPage(1);
+                      setSearchParams({ batch: String(item.id) });
+                    }}
+                  >
+                    查看识别批次
+                  </Button>,
+                ]}
+              >
+                <List.Item.Meta
+                  title={`${item.employee_name} · ${item.expense_month} · 批次 #${item.id}`}
+                  description={`${item.total_files} 个文件`}
+                />
+                <Tag color={statusColor(item.status)}>{batchStatusLabels[item.status]}</Tag>
+              </List.Item>
+            )}
+          />
+        </Card>
+      ) : null}
 
       <Card title="最近批次">
         <List

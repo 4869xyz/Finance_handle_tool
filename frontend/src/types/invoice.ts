@@ -127,13 +127,15 @@ export interface LLMStatusResponse {
   is_configured: boolean;
   active_provider: string | null;
   active_provider_display: string | null;
+  active_model: string | null;
+  supports_vision: boolean;
   configured_providers: string[];
   available_providers: LLMProviderInfo[];
 }
 
 export interface LLMConfigRequest {
   provider: string;
-  api_key: string;
+  api_key?: string;
   model?: string;
   base_url?: string;
 }
@@ -142,6 +144,7 @@ export interface LLMConfigResponse {
   success: boolean;
   message: string;
   provider: string | null;
+  model?: string | null;
 }
 
 export interface LLMTestResponse {

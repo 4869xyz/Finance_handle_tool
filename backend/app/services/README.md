@@ -8,6 +8,9 @@
 |------|------|------|
 | `invoice_service.py` | 发票处理编排：并行 OCR+LLM、字段合并、待审核判定 | ocr/llm、models |
 | `batch_service.py` | 批次路径/上传校验、原子登记、特殊规则、后台领取、统计、恢复与重试 | batch model、document_service |
+| `package_ingest_service.py` | 报销提交包拆月、总表登记 | batch_service、claim_workbook_service |
+| `claim_workbook_service.py` | 报销总表解析与「系统审核」列写回 | openpyxl |
+| `claim_completeness_service.py` | 总表明细与识别结果缺件/分类核验 | expense_record、expense_classification |
 | `document_service.py` | 多资料正文分类、按类型分流提取（PDF 坐标表格 / 规则优先 / 文本 LLM / vision 升级）、整单 OCR/Python 失败兜底、关键字段矩阵与公开字段映射 | ocr/llm、batch model |
 | `document_prompts.py` | 通用报销资料分类与字段提取 Prompt 4.3（分类型规则 + 交易级 Schema + 展示字段） | document_service |
 | `expense_record_service.py` | 将文件级 JSON 转换为筛选、分类和导出使用的交易级视图 | batch model |
@@ -18,7 +21,7 @@
 | `ocr_service.py` | PaddleOCR + 旧发票 PDF 判定 + 通用全页 PDF 文本层（含文字坐标） | paddleocr、pdfplumber 等 |
 | `llm_service.py` | 多厂商 Vision LLM 调用与 JSON 解析 | prompts、config |
 | `prompts.py` | 中国发票 Vision System Prompt / JSON Schema | 被 llm_service 使用 |
-| `model_registry.py` | 模型/厂商注册与能力描述 | settings 相关 |
+| `model_registry.py` | 设置页原生模型 ID 与能力描述（直接发给厂商 SDK） | settings 相关 |
 | `audit_service.py` | 写审计日志 | audit_log model |
 
 ## 边界

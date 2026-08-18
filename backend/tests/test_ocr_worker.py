@@ -173,6 +173,12 @@ async def test_worker_initializes_locks_recovers_and_prewarms_before_claiming(
     )
     monkeypatch.setattr(ocr_worker, "release_worker_lock", release_worker_lock)
 
+    def reload_llm_from_env_file(*, force: bool = False):
+        events.append("reload")
+        return False
+
+    monkeypatch.setattr(ocr_worker, "reload_llm_from_env_file", reload_llm_from_env_file)
+
     await ocr_worker.run_worker(stop_event)
 
     assert events == [
@@ -183,6 +189,7 @@ async def test_worker_initializes_locks_recovers_and_prewarms_before_claiming(
         "prewarm",
         "sigill-exit",
         "verify",
+        "reload",
         "claim",
         "release",
     ]

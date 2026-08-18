@@ -30,7 +30,6 @@ interface LLMConfigModalProps {
   onConfigured?: () => void;
 }
 
-// Fallback models for each provider (used when API fails)
 const FALLBACK_MODELS: Record<string, ModelInfo[]> = {
   openai: [
     { id: 'gpt-4o', name: 'GPT-4o', vision: true },
@@ -50,11 +49,14 @@ const FALLBACK_MODELS: Record<string, ModelInfo[]> = {
   qwen: [
     { id: 'qwen3.7-plus', name: 'Qwen 3.7 Plus', vision: true },
     { id: 'qwen3-vl-plus', name: 'Qwen 3 VL Plus', vision: true },
+    { id: 'qwen3-vl-flash', name: 'Qwen 3 VL Flash', vision: true },
+    { id: 'qwen3.5-ocr', name: 'Qwen 3.5 OCR', vision: true },
     { id: 'qwen2.5-vl-72b-instruct', name: 'Qwen 2.5 VL 72B', vision: true },
     { id: 'qwen-turbo', name: 'Qwen Turbo', vision: false },
   ],
   deepseek: [
     { id: 'deepseek-chat', name: 'DeepSeek Chat', vision: false },
+    { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner', vision: false },
   ],
   zhipu: [
     { id: 'glm-4v', name: 'GLM-4V', vision: true },
@@ -70,18 +72,67 @@ function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
   const [selectedProvider, setSelectedProvider] = useState<string>('');
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
-  const [modelsSource, setModelsSource] = useState<'openrouter' | 'fallback'>('fallback');
   const [form] = Form.useForm();
+  const watchedModel = Form.useWatch('model', form);
+
+  const selectedInfo = status?.available_providers.find((item) => item.name === selectedProvider);
+  const providerHasSavedKey = Boolean(selectedInfo?.is_configured);
+  const selectedModelInfo = models.find((item) => item.id === watchedModel);
+  const showVisionWarning =
+    selectedProvider === 'deepseek' || selectedModelInfo?.vision === false;
+
+  const fetchModels = async (provider: string) => {
+    setModelsLoading(true);
+    try {
+      const response = await getAvailableModels(provider, false);
+      const nextModels =
+        response.models && response.models.length > 0
+          ? response.models
+          : FALLBACK_MODELS[provider] || [];
+      setModels(nextModels);
+      return nextModels;
+    } catch (error) {
+      console.error('Failed to fetch models:', error);
+      const nextModels = FALLBACK_MODELS[provider] || [];
+      setModels(nextModels);
+      return nextModels;
+    } finally {
+      setModelsLoading(false);
+    }
+  };
+
+  const applyProviderFields = (
+    provider: string,
+    data: LLMStatusResponse | null,
+    providerModels: ModelInfo[],
+  ) => {
+    const savedProvider = data?.available_providers.find((item) => item.name === provider);
+    const savedModel =
+      (data?.active_provider === provider ? data.active_model : undefined) ||
+      savedProvider?.model ||
+      providerModels[0]?.id ||
+      '';
+    form.setFieldsValue({
+      provider,
+      model: savedModel,
+      api_key: '',
+      base_url: savedProvider?.base_url || '',
+      config_token: '',
+    });
+  };
 
   const fetchStatus = async () => {
     setLoading(true);
     try {
       const data = await getLLMStatus();
       setStatus(data);
-      if (data.active_provider) {
-        setSelectedProvider(data.active_provider);
-        // Fetch models for the active provider
-        await fetchModels(data.active_provider);
+      const provider = data.active_provider || '';
+      setSelectedProvider(provider);
+      if (provider) {
+        const providerModels = await fetchModels(provider);
+        applyProviderFields(provider, data, providerModels);
+      } else {
+        applyProviderFields(provider, data, []);
       }
     } catch (error) {
       console.error('Failed to fetch LLM status:', error);
@@ -90,61 +141,27 @@ function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
     }
   };
 
-  const fetchModels = async (provider: string) => {
-    setModelsLoading(true);
-    try {
-      const response = await getAvailableModels(provider, false);
-      if (response.models && response.models.length > 0) {
-        setModels(response.models);
-        setModelsSource(response.source);
-      } else {
-        // Fall back to hardcoded models
-        setModels(FALLBACK_MODELS[provider] || []);
-        setModelsSource('fallback');
-      }
-    } catch (error) {
-      console.error('Failed to fetch models:', error);
-      // Fall back to hardcoded models
-      setModels(FALLBACK_MODELS[provider] || []);
-      setModelsSource('fallback');
-    } finally {
-      setModelsLoading(false);
-    }
-  };
-
   useEffect(() => {
     if (open) {
       fetchStatus();
-      form.resetFields();
     }
   }, [open]);
 
+  useEffect(() => {
+    if (!models.length || !selectedProvider) {
+      return;
+    }
+    const currentModel = form.getFieldValue('model');
+    if (!currentModel) {
+      form.setFieldsValue({ model: models[0].id });
+    }
+  }, [models, selectedProvider, form]);
+
   const handleProviderChange = async (provider: string) => {
     setSelectedProvider(provider);
-    // Fetch models for the new provider
-    await fetchModels(provider);
-    // Set default model from fetched list
-    const providerModels = FALLBACK_MODELS[provider] || [];
-    // Pre-populate base_url from saved config if available
-    const savedProvider = status?.available_providers.find(p => p.name === provider);
-    form.setFieldsValue({
-      provider,
-      model: providerModels[0]?.id || '',
-      api_key: '',
-      base_url: savedProvider?.base_url || '',
-      config_token: '',
-    });
+    const providerModels = await fetchModels(provider);
+    applyProviderFields(provider, status, providerModels);
   };
-
-  // Update form model when models are fetched (only if empty)
-  useEffect(() => {
-    if (models.length > 0 && selectedProvider) {
-      const currentModel = form.getFieldValue('model');
-      if (!currentModel) {
-        form.setFieldsValue({ model: models[0].id });
-      }
-    }
-  }, [models, selectedProvider]);
 
   const handleConfigure = async () => {
     try {
@@ -153,7 +170,7 @@ function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
 
       const config = {
         provider: values.provider,
-        api_key: values.api_key,
+        api_key: values.api_key?.trim() || undefined,
         model: values.model || undefined,
         base_url: values.base_url || undefined,
       };
@@ -174,7 +191,6 @@ function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
         }
       }
       if (error && typeof error === 'object' && 'errorFields' in error) {
-        // Form validation error, ignore
         return;
       }
       message.error('配置失败');
@@ -189,7 +205,7 @@ function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
       message.warning('请先选择LLM提供商');
       return;
     }
-    if (!values.api_key?.trim()) {
+    if (!values.api_key?.trim() && !providerHasSavedKey) {
       message.warning('请先输入API密钥');
       return;
     }
@@ -197,7 +213,7 @@ function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
     try {
       const result = await testLLMConfig({
         provider: values.provider,
-        api_key: values.api_key.trim(),
+        api_key: values.api_key?.trim() || undefined,
         model: values.model || undefined,
         base_url: values.base_url?.trim() || undefined,
       });
@@ -250,8 +266,20 @@ function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
       }
       open={open}
       onCancel={onClose}
-      footer={null}
       width={600}
+      footer={
+        loading ? null : (
+          <Space>
+            <Button onClick={onClose}>取消</Button>
+            <Button onClick={handleTestConfig} loading={testingConfig}>
+              测试配置
+            </Button>
+            <Button type="primary" onClick={handleConfigure} loading={configuring}>
+              保存配置
+            </Button>
+          </Space>
+        )
+      }
     >
       {loading ? (
         <div style={{ textAlign: 'center', padding: 40 }}>
@@ -259,15 +287,19 @@ function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
         </div>
       ) : (
         <>
-          {/* Current Status */}
           {status?.is_configured ? (
             <Alert
               message={
                 <Space>
                   <CheckCircleOutlined />
-                  <span>当前使用: {status.active_provider_display}</span>
+                  <span>
+                    当前使用: {status.active_provider_display}
+                    {status.active_model ? ` / ${status.active_model}` : ''}
+                    {status.supports_vision ? '（视觉）' : ''}
+                  </span>
                 </Space>
               }
+              description="保存后用于月度字段提取、审核分类、跨文件核对和单张发票识别。下一份文档起生效，无需重建容器。"
               type="success"
               showIcon={false}
               style={{ marginBottom: 16 }}
@@ -283,7 +315,16 @@ function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
             />
           )}
 
-          {/* Provider List */}
+          {showVisionWarning && (
+            <Alert
+              message="当前模型不支持看图"
+              description="月度资料的视觉升级和单张发票 Vision 会跳过，仅走文本识别或 OCR/规则兜底。"
+              type="warning"
+              showIcon
+              style={{ marginBottom: 16 }}
+            />
+          )}
+
           <div style={{ marginBottom: 16 }}>
             <div style={{ fontWeight: 500, marginBottom: 8 }}>可用的LLM提供商:</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -293,15 +334,9 @@ function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
 
           <Divider />
 
-          {/* Configuration Form */}
           <Form
             form={form}
             layout="vertical"
-            initialValues={{
-              provider: selectedProvider || 'openai',
-              model: FALLBACK_MODELS[selectedProvider || 'openai']?.[0]?.id || '',
-              config_token: '',
-            }}
           >
             <Form.Item
               name="provider"
@@ -311,9 +346,9 @@ function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
               <Select
                 placeholder="选择LLM提供商"
                 onChange={handleProviderChange}
-                options={status?.available_providers.map((p) => ({
-                  label: p.display_name,
-                  value: p.name,
+                options={status?.available_providers.map((item) => ({
+                  label: item.display_name,
+                  value: item.name,
                 }))}
               />
             </Form.Item>
@@ -321,40 +356,36 @@ function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
             <Form.Item
               name="api_key"
               label="API 密钥"
-              rules={[{ required: true, message: '请输入API密钥' }]}
+              rules={
+                providerHasSavedKey
+                  ? []
+                  : [{ required: true, message: '请输入API密钥' }]
+              }
             >
               <Input.Password
-                placeholder="输入API密钥"
+                placeholder={providerHasSavedKey ? '已保存，留空则保持原密钥' : '输入API密钥'}
                 prefix={<ApiOutlined />}
               />
             </Form.Item>
 
-            <Form.Item
-              name="model"
-              label={
-                <Space>
-                  <span>模型</span>
-                  {modelsSource === 'openrouter' && (
-                    <Tag color="blue" style={{ fontSize: 10 }}>来自 OpenRouter</Tag>
-                  )}
-                </Space>
-              }
-            >
+            <Form.Item name="model" label="模型">
               <AutoComplete
                 placeholder={modelsLoading ? '加载模型列表...' : '选择或输入模型名称'}
                 allowClear
-                options={models.map((m) => ({
+                options={models.map((item) => ({
                   label: (
                     <Space>
-                      <span>{m.name || m.id}</span>
-                      {m.vision && (
+                      <span>{item.name || item.id}</span>
+                      {item.vision ? (
                         <Tooltip title="支持图像识别">
                           <EyeOutlined style={{ color: '#1890ff' }} />
                         </Tooltip>
+                      ) : (
+                        <Tag>仅文本</Tag>
                       )}
                     </Space>
                   ),
-                  value: m.id,
+                  value: item.id,
                 }))}
                 filterOption={(input, option) =>
                   (option?.value as string)?.toLowerCase().includes(input.toLowerCase())
@@ -376,25 +407,6 @@ function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
               tooltip="如后端设置 LLM_CONFIG_TOKEN，请在此输入"
             >
               <Input.Password placeholder="输入管理员令牌" />
-            </Form.Item>
-
-            <Form.Item style={{ marginBottom: 0, marginTop: 24 }}>
-              <Space style={{ width: '100%', justifyContent: 'flex-end' }}>
-                <Button onClick={onClose}>取消</Button>
-                <Button
-                  onClick={handleTestConfig}
-                  loading={testingConfig}
-                >
-                  测试配置
-                </Button>
-                <Button
-                  type="primary"
-                  onClick={handleConfigure}
-                  loading={configuring}
-                >
-                  保存配置
-                </Button>
-              </Space>
             </Form.Item>
           </Form>
         </>

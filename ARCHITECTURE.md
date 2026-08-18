@@ -12,7 +12,8 @@
   1. 保留单张中国增值税发票 → OCR + Vision LLM 双源识别 → 字段比对/人工审核；
   2. 新增员工月度目录 → 多资料登记/分类/提取 → 批次统计与人工复核。
 - **第一阶段范围**：`发票`、`补票`、`支付凭证` 目录；发票、行程/票据、支付/订单截图、境外收据等通用字段。
-- **不在第一阶段范围**：月度资金 Excel 核对、视频内容识别、图片相似去重、审批/ERP 对接。
+- **报销提交包（v0.5）**：一次上传 `姓名-报销` 大文件夹（总表 + 多月目录），按月复用现有识别批次，总表右侧新增「系统审核」列。
+- **不在当前范围**：视频内容识别、图片相似去重、审批/ERP 对接、专票/普票核对。
 
 ---
 
@@ -110,6 +111,7 @@ Routers (health / invoices / batches / settings)
     ├─ invoice_service → ocr_service + llm_service + audit_service
     └─ batch_service → document_service → ocr_service + llm_service
                      → document_reconciliation_service → llm_service
+                     → package_ingest / claim_completeness（提交包拆月 + 总表审核）
     ▼
 Models + Database (PostgreSQL)
 ```
@@ -167,6 +169,19 @@ Models + Database (PostgreSQL)
 
 允许的路径形态为 `发票/文件.pdf` 或 `任意根目录/发票/文件.pdf`，`补票`、`支付凭证` 同理；允许来源目录内继续嵌套，三类来源不要求全部出现。扩展名白名单为 PDF、JPG/JPEG、PNG、MP4/MOV/AVI/MKV。员工与月份来自表单（月份 `YYYY-MM`），不解析不透明根目录。
 
+### 6.6 报销提交包与总表审核
+
+```text
+用户在 /batches 选择「姓名-报销」文件夹
+  → POST /api/packages（files 与 relative_paths 同序）
+  → 识别 *报销总表.xlsx，忽略说明 txt 与月度目录内多余 xlsx
+  → 按月度文件夹名拆成多个 processing_batches（复用现有识别）
+  → 各月 OCR / 主辅核对完成后自动审核总表
+  → GET /api/packages/{id}/export/claims 下载带「系统审核」列的总表副本
+```
+
+月度文件夹名支持 `马耿宾2025年4月报销发票` 与 `姓名-2026年1月-报销`。总表「时间」只用于落到年-月。空发票号码不核票号。事项为「打车」「本月打车」时允许该行金额等于当月未占用打车类发票合计。提交人备注列不改。现有单月上传入口保留。
+
 关键不变量：
 
 - 文件名和目录名不能提供日期、金额、对方、号码或单据类型；唯一例外是文件内无法获得有效摘要时，可将去扩展名后的文件名作为 `description` 最后兜底，并记录来源。
@@ -197,7 +212,7 @@ uploaded → processing → confirmed
 ### 6.4 配置与健康
 
 ```text
-LLM 密钥/模型：backend/.env + /api/settings
+LLM 密钥/模型：backend/.env 为唯一真相；页面保存后 API 与 ocr_worker 按文件 mtime 覆盖进程环境并重置 LLM 客户端，下一份文档起生效，无需重建容器。
 健康检查：/api/health（含 DB 连通）
 ```
 
@@ -206,6 +221,7 @@ LLM 密钥/模型：backend/.env + /api/settings
 - **原始发票文件**：DB `invoices.file_data`（不落本地 uploads 目录）
 - **识别结果**：DB 表 `ocr_results` / `llm_results` / `parsing_diffs`
 - **月度批次**：DB 表 `processing_batches` / `source_documents`
+- **报销提交包**：DB 表 `reimbursement_packages`；`processing_batches.package_id` 可空外键。总表二进制存在提交包上，不复制进每月参考表。
 - **批次视频**：仅存路径、大小、哈希和人工复核原因，`source_documents.file_data` 为空
 - **其他批次文件**：原始字节存 `source_documents.file_data`；哈希仅审计，不自动去重
 - **导出 CSV/Excel**：内存生成后直接下载，不落盘归档
@@ -225,7 +241,7 @@ LLM 密钥/模型：backend/.env + /api/settings
 | 文件 | 作用 |
 |------|------|
 | `backend/app/database.py` | 创建 DB 引擎、`get_db()` |
-| `backend/app/config.py` | 读取 `DATABASE_URL`、LLM、上传限制 |
+| `backend/app/config.py` | 读取 `DATABASE_URL`、LLM、上传限制；从 `.env` 热加载 LLM 键并覆盖进程环境 |
 | `backend/app/main.py` | App 入口；启动时 `create_all` 建表 |
 | `backend/.env` | 本地/容器运行时密钥与连接串 |
 
@@ -235,10 +251,14 @@ LLM 密钥/模型：backend/.env + /api/settings
 |------|------|
 | `routers/invoices.py` | 上传、列表、详情、文件、导出、差异确认 |
 | `routers/batches.py` | 月度批次创建、列表、详情、文档分页、全量 Excel 导出和重处理 |
-| `routers/settings.py` | LLM 配置与连通测试 |
+| `routers/packages.py` | 报销提交包上传、列表、详情、总表审核与带「系统审核」列的总表导出 |
+| `routers/settings.py` | LLM 配置、连通测试与原生模型列表；保存后热加载 |
 | `routers/health.py` | 健康检查 |
 | `services/invoice_service.py` | 处理编排、字段合并、待审核判定 |
 | `services/batch_service.py` | 路径校验、流式登记、特殊规则、领取、统计、恢复和重试 |
+| `services/package_ingest_service.py` | 提交包路径拆分、总表解析登记、按月创建批次 |
+| `services/claim_workbook_service.py` | 报销总表读写（系统审核列） |
+| `services/claim_completeness_service.py` | 总表明细与识别结果缺件/分类核验 |
 | `services/document_service.py` | 通用分类、按类型分流提取（规则/文本 LLM/vision）、关键字段校验与公开字段映射 |
 | `services/document_prompts.py` | 多资料分类/提取 Prompt |
 | `services/expense_record_service.py` | 把文件级 JSON 转为下游一笔一行的交易视图，兼容历史数据 |
@@ -249,6 +269,7 @@ LLM 密钥/模型：backend/.env + /api/settings
 | `services/prompts.py` | 中国发票 Vision Prompt / Schema |
 | `models/invoice.py` | invoices / ocr_results / llm_results / parsing_diffs |
 | `models/batch.py` | processing_batches / source_documents / 批次枚举 |
+| `models/reimbursement_package.py` | reimbursement_packages 提交包账本 |
 | `models/audit_log.py` | 审计日志表 |
 
 ### 前端
@@ -296,6 +317,7 @@ docker compose logs -f
 | 文档 | 用途 |
 |------|------|
 | `@ARCHITECTURE.md` | 全局模块与数据流（本文件） |
+| `docs/交接文档.md` | 离职/接手总览（启动、产品线、红线、排障） |
 | 各目录 `@README.md` | 目录成员清单 |
 | `docs/plans/{Feature}_plan.md` | 单功能唯一计划源 |
 | `VersionLog.md` | 按自然日合并的变更日志 |

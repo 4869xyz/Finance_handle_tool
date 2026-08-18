@@ -17,6 +17,9 @@ import type {
   BatchUploadItem,
   ProcessingBatch,
   ReconcileResponse,
+  ReimbursementPackageAuditResponse,
+  ReimbursementPackageDetail,
+  ReimbursementPackageListResponse,
   ReprocessResponse,
   ReviewReference,
   ReviewReferenceListResponse,
@@ -144,6 +147,51 @@ export const getBatchReviewReferenceDownloadUrl = (
   id: number,
   version: number
 ): string => `/api/batches/${id}/review-references/${version}/download`;
+
+export const createReimbursementPackage = async (
+  items: BatchUploadItem[]
+): Promise<ReimbursementPackageDetail> => {
+  const formData = new FormData();
+  items.forEach(({ file, relativePath }) => {
+    formData.append('files', file, file.name);
+    formData.append('relative_paths', relativePath);
+  });
+  const response = await api.post('/packages', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+  return response.data;
+};
+
+export const listReimbursementPackages = async (
+  page = 1,
+  pageSize = 10
+): Promise<ReimbursementPackageListResponse> => {
+  const response = await api.get('/packages', {
+    params: { page, page_size: pageSize },
+  });
+  return response.data;
+};
+
+export const getReimbursementPackage = async (
+  id: number
+): Promise<ReimbursementPackageDetail> => {
+  const response = await api.get(`/packages/${id}`);
+  return response.data;
+};
+
+export const auditReimbursementPackage = async (
+  id: number
+): Promise<ReimbursementPackageAuditResponse> => {
+  const response = await api.post(`/packages/${id}/audit`);
+  return response.data;
+};
+
+export const exportPackageClaims = async (id: number): Promise<Blob> => {
+  const response = await api.get(`/packages/${id}/export/claims`, {
+    responseType: 'blob',
+  });
+  return response.data;
+};
 
 export const getCompanyProfile = async (): Promise<CompanyProfile | null> => {
   const response = await api.get('/settings/company-profile');
@@ -309,7 +357,7 @@ export const testLLMConnection = async (): Promise<LLMTestResponse> => {
 
 // Test LLM config before saving (uses actual provider client library)
 export const testLLMConfig = async (
-  config: { provider: string; api_key: string; model?: string; base_url?: string }
+  config: { provider: string; api_key?: string; model?: string; base_url?: string }
 ): Promise<{ success: boolean; message: string; response_time_ms?: number }> => {
   const response = await api.post('/settings/llm/test-config', config);
   return response.data;

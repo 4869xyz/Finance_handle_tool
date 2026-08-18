@@ -25,6 +25,7 @@ class BatchResponse(BaseModel):
     manual_review_files: int
     skipped_files: int
     failed_files: int
+    package_id: int | None = None
     created_at: datetime
     updated_at: datetime
 

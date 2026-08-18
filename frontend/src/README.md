@@ -10,7 +10,7 @@
 | `App.tsx` | 路由：上传 / 列表 / 详情 / 月度资料识别 | pages、layout |
 | `index.css` | 样式入口 | styles/* |
 | `pages/` | 页面：`UploadPage`、`InvoiceListPage`、`InvoiceDetailPage`、`BatchPage` | components、api、hooks |
-| `components/` | 可复用 UI：布局、MetricCard、StatusTag、LLMConfigModal 等 | antd、types |
+| `components/` | 可复用 UI：布局、MetricCard、StatusTag、LLMConfigModal（保存后热切换识别模型）等 | antd、types |
 | `services/api.ts` | **唯一**后端 API 客户端 | `/api/*` |
 | `hooks/` | `useColumnSettings`、`useInvoiceStatistics` | api、types |
 | `types/invoice.ts` | 前端发票相关类型 | 与后端 schema 对齐 |
@@ -21,4 +21,4 @@
 
 页面事件 → `services/api.ts` → Vite 代理 `/api` → backend → 回写 UI 状态
 
-`BatchPage` 将每个 `File` 与原始 `webkitRelativePath` 在同一循环中配对提交；活动批次每 2 秒轮询，终态或卸载后停止。批次达到 `COMPLETED` 或 `FAILED` 后，可通过 `/api/batches/{id}/export/excel` 下载不受当前分页影响的全量识别结果。
+`BatchPage` 将每个 `File` 与原始 `webkitRelativePath` 在同一循环中配对提交；活动批次每 2 秒轮询，终态或卸载后停止。批次达到 `COMPLETED` 或 `FAILED` 后，可通过 `/api/batches/{id}/export/excel` 下载不受当前分页影响的全量识别结果。同一页可上传「姓名-报销」提交包，识别完成后下载带「系统审核」列的总表。

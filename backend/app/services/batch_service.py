@@ -56,6 +56,14 @@ class ValidatedUploadPath:
     opaque_root: str | None
 
 
+@dataclass(frozen=True)
+class PreparedDocument:
+    path: ValidatedUploadPath
+    content: bytes | None
+    file_size: int
+    file_hash: str
+
+
 def _normalized_name(value: str) -> str:
     return unicodedata.normalize("NFKC", value)
 
@@ -207,11 +215,15 @@ async def _read_upload(
     *,
     keep_content: bool,
     total_before: int,
+    max_total_size: int | None = None,
 ) -> tuple[bytes | None, int, str]:
     settings = get_settings()
     file_size = 0
     digest = hashlib.sha256()
     content = bytearray() if keep_content else None
+    total_limit = (
+        max_total_size if max_total_size is not None else settings.batch_max_total_size
+    )
 
     while True:
         chunk = await upload.read(1024 * 1024)
@@ -223,9 +235,9 @@ async def _read_upload(
                 f"文件 {upload.filename or 'unknown'} 超过 "
                 f"{settings.batch_max_file_size // 1024 // 1024} MiB"
             )
-        if total_before + file_size > settings.batch_max_total_size:
+        if total_before + file_size > total_limit:
             raise BatchValidationError(
-                f"批次总大小超过 {settings.batch_max_total_size // 1024 // 1024} MiB"
+                f"批次总大小超过 {total_limit // 1024 // 1024} MiB"
             )
         digest.update(chunk)
         if content is not None:
@@ -233,6 +245,55 @@ async def _read_upload(
     if file_size == 0:
         raise BatchValidationError(f"不允许空文件：{upload.filename or 'unknown'}")
     return bytes(content) if content is not None else None, file_size, digest.hexdigest()
+
+
+async def register_batch_from_payloads(
+    db: AsyncSession,
+    *,
+    employee_name: str,
+    expense_month: date,
+    payloads: list[PreparedDocument],
+    package_id: int | None = None,
+    commit: bool = True,
+) -> ProcessingBatch:
+    if not payloads:
+        raise BatchValidationError("至少需要上传一个文件")
+    batch = ProcessingBatch(
+        employee_name=employee_name.strip(),
+        expense_month=expense_month,
+        status=BatchStatus.UPLOADED,
+        package_id=package_id,
+    )
+    db.add(batch)
+    await db.flush()
+
+    try:
+        for payload in payloads:
+            special = _special_document_values(payload.path, payload.content)
+            document = SourceDocument(
+                batch_id=batch.id,
+                source_folder=payload.path.source_folder,
+                relative_path=payload.path.relative_path,
+                file_name=payload.path.file_name,
+                file_type=payload.path.file_type,
+                file_size=payload.file_size,
+                file_hash=payload.file_hash,
+                file_data=payload.content,
+                **special,
+            )
+            db.add(document)
+            await db.flush()
+            db.expunge(document)
+
+        await refresh_batch_stats(db, batch.id)
+        if commit:
+            await db.commit()
+            await db.refresh(batch)
+        return batch
+    except Exception:
+        if commit:
+            await db.rollback()
+        raise
 
 
 async def register_batch(
@@ -244,14 +305,7 @@ async def register_batch(
     relative_paths: list[str],
 ) -> ProcessingBatch:
     paths = validate_upload_paths(files, relative_paths)
-    batch = ProcessingBatch(
-        employee_name=employee_name.strip(),
-        expense_month=expense_month,
-        status=BatchStatus.UPLOADED,
-    )
-    db.add(batch)
-    await db.flush()
-
+    payloads: list[PreparedDocument] = []
     total_size = 0
     try:
         for upload, path in zip(files, paths, strict=True):
@@ -262,26 +316,20 @@ async def register_batch(
                 total_before=total_size,
             )
             total_size += file_size
-            special = _special_document_values(path, content)
-            document = SourceDocument(
-                batch_id=batch.id,
-                source_folder=path.source_folder,
-                relative_path=path.relative_path,
-                file_name=path.file_name,
-                file_type=path.file_type,
-                file_size=file_size,
-                file_hash=file_hash,
-                file_data=content,
-                **special,
+            payloads.append(
+                PreparedDocument(
+                    path=path,
+                    content=content,
+                    file_size=file_size,
+                    file_hash=file_hash,
+                )
             )
-            db.add(document)
-            await db.flush()
-            db.expunge(document)
-
-        await refresh_batch_stats(db, batch.id)
-        await db.commit()
-        await db.refresh(batch)
-        return batch
+        return await register_batch_from_payloads(
+            db,
+            employee_name=employee_name,
+            expense_month=expense_month,
+            payloads=payloads,
+        )
     except Exception:
         await db.rollback()
         raise
@@ -433,6 +481,16 @@ async def process_document_id(document_id: int) -> bool:
         except Exception as exc:
             logger.warning(
                 "Automatic reconciliation failed for batch=%s: %s",
+                batch_id,
+                exc.__class__.__name__,
+            )
+        try:
+            from app.services.claim_completeness_service import maybe_audit_package
+
+            await maybe_audit_package(batch_id)
+        except Exception as exc:
+            logger.warning(
+                "Automatic package audit failed for batch=%s: %s",
                 batch_id,
                 exc.__class__.__name__,
             )

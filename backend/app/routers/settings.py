@@ -2,7 +2,6 @@
 
 import logging
 import os
-from pathlib import Path
 from typing import Optional, List
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Header
@@ -10,55 +9,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
-
-
-def _update_env_file(updates: dict[str, str]) -> None:
-    """Update .env file with new key-value pairs.
-
-    Preserves existing entries and comments, updates existing keys,
-    and appends new keys at the end.
-    """
-    env_path = Path(__file__).parent.parent.parent / ".env"
-
-    # Read existing content
-    existing_lines = []
-    existing_keys = set()
-    if env_path.exists():
-        with open(env_path, "r") as f:
-            for line in f:
-                stripped = line.strip()
-                # Track existing keys (ignore comments and empty lines)
-                if stripped and not stripped.startswith("#") and "=" in stripped:
-                    key = stripped.split("=", 1)[0].strip()
-                    existing_keys.add(key)
-                existing_lines.append(line)
-
-    # Update existing lines or mark keys as handled
-    updated_keys = set()
-    new_lines = []
-    for line in existing_lines:
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#") and "=" in stripped:
-            key = stripped.split("=", 1)[0].strip()
-            if key in updates:
-                # Replace this line with updated value
-                new_lines.append(f"{key}={updates[key]}\n")
-                updated_keys.add(key)
-            else:
-                new_lines.append(line)
-        else:
-            new_lines.append(line)
-
-    # Append new keys that weren't in the file
-    for key, value in updates.items():
-        if key not in updated_keys:
-            new_lines.append(f"{key}={value}\n")
-
-    # Write back
-    with open(env_path, "w") as f:
-        f.writelines(new_lines)
-
-    logger.info(f"Updated .env file with keys: {list(updates.keys())}")
 
 
 def _require_llm_config_token(
@@ -81,7 +31,12 @@ def _require_llm_config_token(
     if not candidate or candidate != required_token:
         raise HTTPException(status_code=401, detail="未授权")
 
-from app.config import get_settings, clear_settings_cache
+from app.config import (
+    build_llm_env_updates,
+    get_settings,
+    reload_llm_from_env_file,
+    update_env_file,
+)
 from app.database import get_db
 from app.models.company_profile import CompanyProfile
 from app.schemas.company_profile import (
@@ -89,7 +44,7 @@ from app.schemas.company_profile import (
     CompanyProfileResponse,
     CompanyProfileUpdate,
 )
-from app.services.llm_service import get_llm_service, reset_llm_service, PROVIDERS
+from app.services.llm_service import get_llm_service, PROVIDERS
 from app.services.model_registry import get_models_with_fallback
 
 router = APIRouter()
@@ -157,6 +112,8 @@ class LLMStatusResponse(BaseModel):
     is_configured: bool
     active_provider: Optional[str] = None
     active_provider_display: Optional[str] = None
+    active_model: Optional[str] = None
+    supports_vision: bool = False
     configured_providers: List[str] = []
     available_providers: List[LLMProviderInfo] = []
 
@@ -164,7 +121,7 @@ class LLMStatusResponse(BaseModel):
 class LLMConfigRequest(BaseModel):
     """Request to configure an LLM provider."""
     provider: str
-    api_key: str
+    api_key: Optional[str] = None
     model: Optional[str] = None
     base_url: Optional[str] = None
 
@@ -174,6 +131,7 @@ class LLMConfigResponse(BaseModel):
     success: bool
     message: str
     provider: Optional[str] = None
+    model: Optional[str] = None
 
 
 # Display names for providers
@@ -200,13 +158,14 @@ DEFAULT_MODELS = {
 @router.get("/llm/status", response_model=LLMStatusResponse)
 async def get_llm_status():
     """Get LLM configuration status."""
+    reload_llm_from_env_file()
     settings = get_settings()
     llm_service = get_llm_service()
 
     active_provider = settings.get_active_llm_provider()
     configured_providers = llm_service.get_configured_providers()
+    active_model = _get_provider_model(active_provider) if active_provider else None
 
-    # Build available providers list
     available_providers = []
     for name in PROVIDERS.keys():
         provider_info = LLMProviderInfo(
@@ -214,7 +173,7 @@ async def get_llm_status():
             display_name=PROVIDER_DISPLAY_NAMES.get(name, name),
             is_configured=name in configured_providers,
             model=_get_provider_model(name) if name in configured_providers else DEFAULT_MODELS.get(name),
-            base_url=_get_provider_base_url(name) if name in configured_providers else None,
+            base_url=_get_provider_base_url(name),
         )
         available_providers.append(provider_info)
 
@@ -222,6 +181,8 @@ async def get_llm_status():
         is_configured=settings.is_llm_configured(),
         active_provider=active_provider,
         active_provider_display=PROVIDER_DISPLAY_NAMES.get(active_provider, active_provider) if active_provider else None,
+        active_model=active_model,
+        supports_vision=llm_service.supports_vision() if settings.is_llm_configured() else False,
         configured_providers=configured_providers,
         available_providers=available_providers,
     )
@@ -248,50 +209,35 @@ async def configure_llm(
             detail=f"不支持的LLM提供商: {provider}。支持的提供商: {', '.join(PROVIDERS.keys())}"
         )
 
-    if not request.api_key:
-        raise HTTPException(status_code=400, detail="API密钥不能为空")
-
     try:
-        # Build env updates for both os.environ and .env file
-        env_updates: dict[str, str] = {"LLM_PROVIDER": provider}
+        current = get_settings()
+        existing_api_key = str(getattr(current, f"{provider}_api_key", "") or "")
+        try:
+            env_updates = build_llm_env_updates(
+                provider,
+                api_key=request.api_key,
+                model=request.model,
+                base_url=request.base_url,
+                existing_api_key=existing_api_key,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        # Provider-specific configuration
-        provider_config = {
-            "openai": ("OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL"),
-            "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL"),
-            "google": ("GOOGLE_API_KEY", "GOOGLE_MODEL", "GOOGLE_BASE_URL"),
-            "qwen": ("QWEN_API_KEY", "QWEN_MODEL", "QWEN_BASE_URL"),
-            "deepseek": ("DEEPSEEK_API_KEY", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL"),
-            "zhipu": ("ZHIPU_API_KEY", "ZHIPU_MODEL", "ZHIPU_BASE_URL"),
-        }
+        update_env_file(env_updates)
+        reload_llm_from_env_file(force=True)
 
-        key_name, model_name, base_url_name = provider_config[provider]
-        env_updates[key_name] = request.api_key
-        if request.model:
-            env_updates[model_name] = request.model
-        if request.base_url and base_url_name:
-            env_updates[base_url_name] = request.base_url
-
-        # Set environment variables for current process
-        for key, value in env_updates.items():
-            os.environ[key] = value
-
-        # Persist to .env file for restart persistence
-        _update_env_file(env_updates)
-
-        # Clear caches to reload settings
-        clear_settings_cache()
-        reset_llm_service()
-
-        # Verify configuration
         new_settings = get_settings()
         if not new_settings.is_llm_configured():
             raise HTTPException(status_code=500, detail="配置失败，请检查API密钥是否正确")
 
+        active_model = _get_provider_model(provider)
+        display_name = PROVIDER_DISPLAY_NAMES.get(provider, provider)
+        model_label = f" / {active_model}" if active_model else ""
         return LLMConfigResponse(
             success=True,
-            message=f"已成功配置 {PROVIDER_DISPLAY_NAMES.get(provider, provider)}",
+            message=f"已切换到 {display_name}{model_label}，正在处理的下一份文档起生效",
             provider=provider,
+            model=active_model,
         )
 
     except HTTPException:
@@ -367,7 +313,7 @@ def _get_provider_base_url(provider_name: str) -> Optional[str]:
 class ConfigTestRequest(BaseModel):
     """Request to test LLM config before saving."""
     provider: str
-    api_key: str
+    api_key: Optional[str] = None
     model: Optional[str] = None
     base_url: Optional[str] = None
 
@@ -440,7 +386,10 @@ async def test_llm_config(request: ConfigTestRequest):
             detail=f"不支持的LLM提供商: {provider}。支持的提供商: {', '.join(PROVIDERS.keys())}"
         )
 
-    if not request.api_key:
+    api_key = (request.api_key or "").strip()
+    if not api_key:
+        api_key = str(getattr(get_settings(), f"{provider}_api_key", "") or "")
+    if not api_key:
         raise HTTPException(status_code=400, detail="API密钥不能为空")
 
     model = request.model or DEFAULT_MODELS.get(provider, "")
@@ -450,7 +399,7 @@ async def test_llm_config(request: ConfigTestRequest):
     try:
         if provider in ("openai", "qwen", "deepseek"):
             from openai import OpenAI
-            kwargs = {"api_key": request.api_key}
+            kwargs = {"api_key": api_key}
             effective_url = base_url or _DEFAULT_BASE_URLS.get(provider)
             if effective_url:
                 kwargs["base_url"] = effective_url
@@ -463,7 +412,7 @@ async def test_llm_config(request: ConfigTestRequest):
 
         elif provider == "anthropic":
             import anthropic
-            kwargs = {"api_key": request.api_key}
+            kwargs = {"api_key": api_key}
             if base_url:
                 kwargs["base_url"] = base_url
             client = anthropic.Anthropic(**kwargs)
@@ -477,7 +426,7 @@ async def test_llm_config(request: ConfigTestRequest):
 
         elif provider == "google":
             import google.generativeai as genai
-            configure_kwargs = {"api_key": request.api_key}
+            configure_kwargs = {"api_key": api_key}
             if base_url:
                 configure_kwargs["client_options"] = {"api_endpoint": base_url}
             genai.configure(**configure_kwargs)
@@ -487,7 +436,7 @@ async def test_llm_config(request: ConfigTestRequest):
 
         elif provider == "zhipu":
             from zhipuai import ZhipuAI
-            kwargs = {"api_key": request.api_key}
+            kwargs = {"api_key": api_key}
             if base_url:
                 kwargs["base_url"] = base_url
             client = ZhipuAI(**kwargs)
@@ -578,10 +527,7 @@ async def get_available_models(
             all_models.extend(get_models_with_fallback(prov, vision_only))
         models = all_models
 
-    # Determine source based on model ID format (OpenRouter uses "provider/model" format)
-    source = "openrouter" if models and "/" in models[0].get("id", "") else "fallback"
-
     return ModelsResponse(
         models=[ModelInfo(**m) for m in models],
-        source=source
+        source="fallback",
     )

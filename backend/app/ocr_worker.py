@@ -5,7 +5,8 @@ import signal
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.database import Base, engine, ensure_source_document_display_columns
+from app.config import reload_llm_from_env_file
+from app.database import Base, engine, ensure_source_document_display_columns, ensure_processing_batch_package_id
 from app.services.batch_service import (
     process_next_queued_document,
     recover_interrupted_batches,
@@ -23,6 +24,7 @@ async def initialize_database() -> None:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await ensure_source_document_display_columns(connection)
+        await ensure_processing_batch_package_id(connection)
 
 
 async def try_acquire_worker_lock(connection: AsyncConnection) -> bool:
@@ -132,6 +134,7 @@ async def run_worker(stop_event: asyncio.Event) -> None:
                     lock_connection,
                     lock_backend_pid,
                 )
+                reload_llm_from_env_file()
                 processed = await process_next_queued_document()
                 if not processed:
                     await _wait_or_stop(stop_event, POLL_INTERVAL_SECONDS)

@@ -37,6 +37,16 @@ async def ensure_source_document_display_columns(connection) -> None:
         )
 
 
+async def ensure_processing_batch_package_id(connection) -> None:
+    """Add nullable package_id on existing processing_batches tables."""
+    await connection.execute(
+        text(
+            "ALTER TABLE processing_batches "
+            "ADD COLUMN IF NOT EXISTS package_id INTEGER"
+        )
+    )
+
+
 async def get_db():
     async with async_session_maker() as session:
         try:

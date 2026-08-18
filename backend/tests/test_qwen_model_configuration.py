@@ -29,6 +29,11 @@ def test_qwen_registry_returns_dashscope_native_model_ids(monkeypatch):
     assert all("/" not in model["id"] for model in models)
 
 
+def test_openai_registry_does_not_use_openrouter_ids():
+    models = model_registry.get_models_with_fallback("openai")
+    assert all("/" not in model["id"] for model in models)
+
+
 def test_qwen_3_7_plus_uses_the_vision_request_path(monkeypatch):
     """Invoice images must not be downgraded to text-only processing."""
     monkeypatch.setattr(llm_service.settings, "qwen_model", "qwen3.7-plus")

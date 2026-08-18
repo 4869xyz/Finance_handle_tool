@@ -4,7 +4,7 @@ from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 
 from app.config import get_settings
-from app.routers import batches, health, invoices, settings as settings_router
+from app.routers import batches, health, invoices, packages, settings as settings_router
 from app.rate_limit import limiter
 
 settings = get_settings()
@@ -39,15 +39,22 @@ app.add_middleware(
 app.include_router(health.router, prefix="/api", tags=["Health"])
 app.include_router(invoices.router, prefix="/api/invoices", tags=["Invoices"])
 app.include_router(batches.router, prefix="/api/batches", tags=["Batches"])
+app.include_router(packages.router, prefix="/api/packages", tags=["Packages"])
 app.include_router(settings_router.router, prefix="/api/settings", tags=["Settings"])
 
 
 @app.on_event("startup")
 async def startup():
-    from app.database import engine, Base, ensure_source_document_display_columns
+    from app.database import (
+        engine,
+        Base,
+        ensure_source_document_display_columns,
+        ensure_processing_batch_package_id,
+    )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await ensure_source_document_display_columns(conn)
+        await ensure_processing_batch_package_id(conn)
 
 
 @app.get("/")

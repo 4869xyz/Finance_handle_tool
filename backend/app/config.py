@@ -1,6 +1,48 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
+from pathlib import Path
 from typing import Optional
+import logging
+import os
+import tempfile
+
+logger = logging.getLogger(__name__)
+
+ENV_FILE_PATH = Path(__file__).resolve().parent.parent / ".env"
+
+LLM_ENV_KEYS = frozenset({
+    "LLM_PROVIDER",
+    "OPENAI_API_KEY",
+    "OPENAI_MODEL",
+    "OPENAI_BASE_URL",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_BASE_URL",
+    "GOOGLE_API_KEY",
+    "GOOGLE_MODEL",
+    "GOOGLE_BASE_URL",
+    "QWEN_API_KEY",
+    "QWEN_MODEL",
+    "QWEN_BASE_URL",
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_MODEL",
+    "DEEPSEEK_BASE_URL",
+    "ZHIPU_API_KEY",
+    "ZHIPU_MODEL",
+    "ZHIPU_BASE_URL",
+})
+
+PROVIDER_ENV_KEYS = {
+    "openai": ("OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL"),
+    "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL"),
+    "google": ("GOOGLE_API_KEY", "GOOGLE_MODEL", "GOOGLE_BASE_URL"),
+    "qwen": ("QWEN_API_KEY", "QWEN_MODEL", "QWEN_BASE_URL"),
+    "deepseek": ("DEEPSEEK_API_KEY", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL"),
+    "zhipu": ("ZHIPU_API_KEY", "ZHIPU_MODEL", "ZHIPU_BASE_URL"),
+}
+
+_env_file_path_override: Path | None = None
+_last_llm_env_mtime: float | None = None
 
 
 class Settings(BaseSettings):
@@ -56,6 +98,8 @@ class Settings(BaseSettings):
     batch_processing_concurrency: int = 2
     batch_classification_threshold: float = 0.80
     batch_extraction_threshold: float = 0.75
+    package_max_files: int = 600
+    package_max_total_size: int = 768 * 1024 * 1024
 
     # Parallel processing settings
     # Separate pools for OCR and LLM to maximize throughput
@@ -108,3 +152,133 @@ def get_settings() -> Settings:
 def clear_settings_cache():
     """Clear the settings cache to reload from environment."""
     get_settings.cache_clear()
+
+
+def get_env_file_path() -> Path:
+    return _env_file_path_override or ENV_FILE_PATH
+
+
+def set_env_file_path_for_tests(path: Path | None) -> None:
+    """Point LLM .env reload at a temp file during tests."""
+    global _env_file_path_override, _last_llm_env_mtime
+    _env_file_path_override = path
+    _last_llm_env_mtime = None
+
+
+def parse_env_file(path: Path) -> dict[str, str]:
+    """Parse KEY=VALUE lines, ignoring comments and blank lines."""
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def update_env_file(updates: dict[str, str], env_path: Path | None = None) -> None:
+    """Update .env key-value pairs with an atomic replace.
+
+    Preserves existing entries and comments, updates existing keys,
+    and appends new keys at the end.
+    """
+    path = env_path or get_env_file_path()
+    existing_lines: list[str] = []
+    if path.exists():
+        existing_lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+
+    updated_keys: set[str] = set()
+    new_lines: list[str] = []
+    for line in existing_lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key in updates:
+                new_lines.append(f"{key}={updates[key]}\n")
+                updated_keys.add(key)
+            else:
+                new_lines.append(line if line.endswith("\n") else f"{line}\n")
+        else:
+            new_lines.append(line if line.endswith("\n") else f"{line}\n")
+
+    for key, value in updates.items():
+        if key not in updated_keys:
+            new_lines.append(f"{key}={value}\n")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".env.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.writelines(new_lines)
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+    logger.info("Updated .env file with keys: %s", list(updates.keys()))
+
+
+def apply_llm_env_from_file(env_path: Path | None = None) -> dict[str, str]:
+    """Copy LLM keys from .env onto os.environ, overriding process/Docker values."""
+    path = env_path or get_env_file_path()
+    parsed = parse_env_file(path)
+    applied: dict[str, str] = {}
+    for key in LLM_ENV_KEYS:
+        if key in parsed:
+            os.environ[key] = parsed[key]
+            applied[key] = parsed[key]
+    return applied
+
+
+def build_llm_env_updates(
+    provider: str,
+    *,
+    api_key: str | None,
+    model: str | None,
+    base_url: str | None,
+    existing_api_key: str,
+) -> dict[str, str]:
+    """Build .env updates for switching the active recognition model."""
+    if provider not in PROVIDER_ENV_KEYS:
+        raise ValueError(f"不支持的LLM提供商: {provider}")
+    key_name, model_name, base_url_name = PROVIDER_ENV_KEYS[provider]
+    updates: dict[str, str] = {"LLM_PROVIDER": provider}
+    trimmed_key = (api_key or "").strip()
+    if trimmed_key:
+        updates[key_name] = trimmed_key
+    elif not (existing_api_key or "").strip():
+        raise ValueError("API密钥不能为空")
+    if model:
+        updates[model_name] = model
+    if base_url:
+        updates[base_url_name] = base_url
+    return updates
+
+
+def reload_llm_from_env_file(*, force: bool = False, env_path: Path | None = None) -> bool:
+    """Reload LLM settings from .env when the file mtime changes.
+
+    Returns True if settings were reapplied.
+    """
+    global _last_llm_env_mtime
+    path = env_path or get_env_file_path()
+    if not path.exists():
+        return False
+    mtime = path.stat().st_mtime
+    if not force and _last_llm_env_mtime is not None and mtime == _last_llm_env_mtime:
+        return False
+    apply_llm_env_from_file(path)
+    clear_settings_cache()
+    from app.services.llm_service import reset_llm_service
+    reset_llm_service()
+    _last_llm_env_mtime = mtime
+    return True

@@ -166,25 +166,25 @@ def get_formatted_models_for_provider(
     return [format_model_for_api(m) for m in models]
 
 
-# Fallback hardcoded models for when OpenRouter is unavailable
+# Native model IDs that can be sent directly to each provider SDK.
 FALLBACK_MODELS = {
     "openai": [
-        {"id": "openai/gpt-4o", "name": "GPT-4o", "vision": True},
-        {"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini", "vision": True},
-        {"id": "openai/gpt-4-turbo", "name": "GPT-4 Turbo", "vision": True},
-        {"id": "openai/o1", "name": "o1", "vision": True},
-        {"id": "openai/o1-mini", "name": "o1 Mini", "vision": True},
+        {"id": "gpt-4o", "name": "GPT-4o", "vision": True},
+        {"id": "gpt-4o-mini", "name": "GPT-4o Mini", "vision": True},
+        {"id": "gpt-4-turbo", "name": "GPT-4 Turbo", "vision": True},
+        {"id": "o1", "name": "o1", "vision": True},
+        {"id": "o1-mini", "name": "o1 Mini", "vision": True},
     ],
     "anthropic": [
-        {"id": "anthropic/claude-sonnet-4", "name": "Claude Sonnet 4", "vision": True},
-        {"id": "anthropic/claude-3.5-sonnet", "name": "Claude 3.5 Sonnet", "vision": True},
-        {"id": "anthropic/claude-3.5-haiku", "name": "Claude 3.5 Haiku", "vision": True},
-        {"id": "anthropic/claude-3-opus", "name": "Claude 3 Opus", "vision": True},
+        {"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4", "vision": True},
+        {"id": "claude-3-5-sonnet-20241022", "name": "Claude 3.5 Sonnet", "vision": True},
+        {"id": "claude-3-5-haiku-20241022", "name": "Claude 3.5 Haiku", "vision": True},
+        {"id": "claude-3-opus-20240229", "name": "Claude 3 Opus", "vision": True},
     ],
     "google": [
-        {"id": "google/gemini-2.0-flash-001", "name": "Gemini 2.0 Flash", "vision": True},
-        {"id": "google/gemini-1.5-pro", "name": "Gemini 1.5 Pro", "vision": True},
-        {"id": "google/gemini-1.5-flash", "name": "Gemini 1.5 Flash", "vision": True},
+        {"id": "gemini-2.0-flash", "name": "Gemini 2.0 Flash", "vision": True},
+        {"id": "gemini-1.5-pro", "name": "Gemini 1.5 Pro", "vision": True},
+        {"id": "gemini-1.5-flash", "name": "Gemini 1.5 Flash", "vision": True},
     ],
     "qwen": [
         {"id": "qwen3.7-plus", "name": "Qwen 3.7 Plus", "vision": True},
@@ -196,10 +196,9 @@ FALLBACK_MODELS = {
         {"id": "qwen-turbo", "name": "Qwen Turbo", "vision": False},
     ],
     "deepseek": [
-        {"id": "deepseek/deepseek-chat", "name": "DeepSeek Chat", "vision": False},
-        {"id": "deepseek/deepseek-r1", "name": "DeepSeek R1", "vision": False},
+        {"id": "deepseek-chat", "name": "DeepSeek Chat", "vision": False},
+        {"id": "deepseek-reasoner", "name": "DeepSeek Reasoner", "vision": False},
     ],
-    # Zhipu uses native SDK, so model IDs are Zhipu's native format (not OpenRouter)
     "zhipu": [
         {"id": "glm-4v-plus", "name": "GLM-4V Plus (视觉增强)", "vision": True},
         {"id": "glm-4v", "name": "GLM-4V (视觉)", "vision": True},
@@ -215,33 +214,8 @@ def get_models_with_fallback(
     provider: str,
     vision_only: bool = False
 ) -> list[dict]:
-    """Get models for a provider, with fallback to hardcoded list.
-
-    Args:
-        provider: Provider name
-        vision_only: If True, only return vision-capable models
-
-    Returns:
-        List of model dictionaries
-    """
-    provider_lower = provider.lower()
-
-    # Qwen and Zhipu use provider-native model IDs rather than OpenRouter IDs.
-    if provider_lower in {"qwen", "zhipu"}:
-        fallback = FALLBACK_MODELS.get(provider_lower, [])
-        if vision_only:
-            return [m for m in fallback if m.get("vision", False)]
-        return fallback
-
-    # Try OpenRouter first for other providers
-    models = get_formatted_models_for_provider(provider, vision_only)
-
-    # Fall back to hardcoded list if OpenRouter returns nothing
-    if not models:
-        fallback = FALLBACK_MODELS.get(provider_lower, [])
-        if vision_only:
-            models = [m for m in fallback if m.get("vision", False)]
-        else:
-            models = fallback
-
-    return models
+    """Return native model IDs that can be sent to the provider SDK."""
+    fallback = FALLBACK_MODELS.get(provider.lower(), [])
+    if vision_only:
+        return [m for m in fallback if m.get("vision", False)]
+    return fallback

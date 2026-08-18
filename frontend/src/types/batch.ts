@@ -137,6 +137,51 @@ export interface ReviewReferenceListResponse {
   items: ReviewReference[];
 }
 
+export type PackageStatus = 'UPLOADED' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
+
+export interface ReimbursementPackage {
+  id: number;
+  employee_name: string;
+  status: PackageStatus;
+  status_reason: string | null;
+  status_detail: string | null;
+  original_filename: string;
+  file_hash: string;
+  file_size: number;
+  sheet_name: string | null;
+  claim_count: number;
+  audited_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReimbursementPackageDetail extends ReimbursementPackage {
+  batches: ProcessingBatch[];
+  months: string[];
+}
+
+export interface ReimbursementPackageListResponse {
+  items: ReimbursementPackage[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface ReimbursementPackageAuditResponse {
+  package_id: number;
+  status: PackageStatus;
+  claim_count: number;
+  audited_at: string | null;
+  message: string;
+}
+
+export const packageStatusLabels: Record<PackageStatus, string> = {
+  UPLOADED: '已上传',
+  PROCESSING: '识别中',
+  COMPLETED: '已完成',
+  FAILED: '失败',
+};
+
 export const batchStatusLabels: Record<BatchStatus, string> = {
   UPLOADED: '已上传',
   PROCESSING: '识别中',
